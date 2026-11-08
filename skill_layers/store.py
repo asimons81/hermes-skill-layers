@@ -337,14 +337,11 @@ class Store:
     def _fsync_dir(path: Path) -> None:
         if not hasattr(os, "O_DIRECTORY"):
             return
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except OSError:
-            pass
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def close(self) -> None:
         if self._conn is not None:
@@ -451,6 +448,7 @@ class Store:
         target = self._object_path(digest)
         try:
             self.objects.mkdir(mode=0o700)
+            self._fsync_dir(self.root)
         except FileExistsError:
             pass
         objects_info = self.objects.lstat()
@@ -458,6 +456,7 @@ class Store:
             raise LayerError("PATH_UNSAFE", "Content object root must be a real directory.")
         try:
             target.parent.mkdir(mode=0o700)
+            self._fsync_dir(self.objects)
         except FileExistsError:
             pass
         parent_info = target.parent.lstat()
@@ -465,6 +464,7 @@ class Store:
             raise LayerError("PATH_UNSAFE", "Content object directory must be a real directory.")
         if target.exists():
             self._verify_object(target, digest)
+            self._fsync_dir(target.parent)
             return
         fd, temporary_name = tempfile.mkstemp(prefix=".object-", dir=target.parent)
         temporary = Path(temporary_name)

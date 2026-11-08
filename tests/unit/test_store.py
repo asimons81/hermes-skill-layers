@@ -240,3 +240,19 @@ def test_content_object_crash_after_atomic_move_remains_readable(tmp_path, monke
     store._write_object(content, digest)
     assert list(path.parent.glob(".object-*")) == []
     store.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_DIRECTORY"), reason="POSIX directory fsync")
+def test_directory_fsync_failure_is_not_silently_successful(tmp_path, monkeypatch):
+    import errno
+
+    _, store = _initialized_store(tmp_path, monkeypatch)
+
+    def fail(_descriptor):
+        raise OSError(errno.ENOSPC, "Simulated directory flush failure")
+
+    monkeypatch.setattr(os, "fsync", fail)
+    with pytest.raises(OSError) as error:
+        store._fsync_dir(store.root)
+    assert error.value.errno == errno.ENOSPC
+    store.close()

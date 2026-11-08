@@ -304,7 +304,7 @@ def run_profile(
     env["QA_NETWORK_ATTEMPTS"] = str(attempts)
     env["QA_REPORT_PATH"] = str(run_root / f"{variant}-report.json")
     env["QA_HERMES_ROOT"] = str(hermes_root)
-    env["QA_EXPECT_OTHER_PROFILE"] = "a-separate-disposable-profile"
+    env["QA_EXPECT_OTHER_PROFILE"] = "qa-release-notes"
     worker = ROOT / "scripts" / "qa_worker.py"
     cmd = [
         "python",

@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Record runtime versions
+        run: |
+          python -c "import platform, sys; print(platform.platform()); print(sys.version)"
+          git --version
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q tests/unit tests/integration --junitxml=qa-results/unit.xml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -45,6 +49,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
+      - name: Record runtime versions
+        run: |
+          python -c "import platform, sys; print(platform.platform()); print(sys.version)"
+          git --version
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check .
       - run: python -m ruff format --check .
@@ -58,7 +66,9 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+      - run: node --version
       - run: npm ci
+      - run: npx playwright --version
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -69,3 +79,24 @@ jobs:
             test-results/
             playwright-report/
           if-no-files-found: warn
+
+  validator:
+    name: Hermes validator / ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: v0.23.0
+            ref: 2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
+          - label: pinned-main
+            ref: c8d4e43efd296f632116cf3f17738aa2c4838460
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - uses: NousResearch/hermes-agent/.github/actions/plugin-validate@c8d4e43efd296f632116cf3f17738aa2c4838460
+        with:
+          path: .
+          hermes-ref: ${{ matrix.ref }}

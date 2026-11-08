@@ -235,10 +235,11 @@ def run() -> dict[str, Any]:
     parser.add_argument("--plugin-hash", required=True)
     args = parser.parse_args()
     root = args.hermes_root.resolve(strict=True)
-    plugin_dir = args.plugin_dir.resolve(strict=True)
+    plugin_argument = args.plugin_dir.absolute()
+    plugin_dir = plugin_argument.resolve(strict=True)
     home = Path(os.environ["HERMES_HOME"]).resolve(strict=True)
     check(
-        plugin_dir == home / "plugins" / "skill-layers",
+        plugin_argument == home / "plugins" / "skill-layers",
         "Plugin payload is outside the disposable profile",
     )
     check(
@@ -319,9 +320,63 @@ def run() -> dict[str, Any]:
             not attempts.exists() or not attempts.read_text(encoding="utf-8").strip(),
             "Profile B read workflow attempted networking",
         )
+        independent = home / "skills" / "qa-profile-b"
+        independent.mkdir(parents=True, exist_ok=False)
+        independent_skill = independent / "SKILL.md"
+        independent_skill.write_text(
+            "---\nname: qa-profile-b\ndescription: Independent profile fixture.\n---\n"
+            "# Profile B only\n\nThis source belongs to profile B.\n",
+            encoding="utf-8",
+            newline="",
+        )
+        independent_before = tree_digest(independent)
+        independent_sources = json_command(root, ["skill-layers", "sources", "--json"])["sources"]
+        source_matches = [
+            item for item in independent_sources if item.get("selector") == "qa-profile-b"
+        ]
+        check(len(source_matches) == 1, "Profile B did not discover its independent source")
+        derived = json_command(
+            root,
+            ["skill-layers", "derive", source_matches[0]["id"], "--label", "Profile B", "--json"],
+        )
+        candidate = json_command(root, ["skill-layers", "diff", derived["candidate_id"], "--json"])
+        check(candidate.get("state") == "ready", "Profile B derive candidate is not ready")
+        independent_publish = json_command(
+            root,
+            [
+                "skill-layers",
+                "publish",
+                derived["candidate_id"],
+                "--revision",
+                str(candidate["revision"]),
+                "--review-hash",
+                candidate["review_hash"],
+                "--json",
+            ],
+        )
+        independent_export = independent_publish.get("export", {})
+        check(
+            Path(independent_export.get("directory", "")).is_dir(),
+            "Profile B publication did not create its independent export",
+        )
+        check(
+            tree_digest(independent) == independent_before,
+            "Profile B derive publication changed its source",
+        )
+        check(
+            independent_export.get("selector", "").startswith("sl-"),
+            "Profile B publication did not create a distinct ordinary skill",
+        )
         report["profile_id"] = listed_envelope.get("profile_id")
         report["checks"].append(
             {"id": "profile-isolation", "ok": True, "other_profile_marker": scope_a}
+        )
+        report["checks"].append(
+            {
+                "id": "profile-b-independent-derive-publish-source-preserved",
+                "ok": True,
+                "selector": independent_export["selector"],
+            }
         )
         return report
 
@@ -803,6 +858,56 @@ def run() -> dict[str, Any]:
         "A plugin workflow attempted outbound networking",
     )
     passed("plugin-owned-workflow-outbound-network-denied")
+
+    # Exercise the host-managed installed-plugin lifecycle only after all plugin-owned checks.
+    # The export is an ordinary profile skill and must remain usable after disable and removal.
+    export_bytes = tree_bytes(export_dir)
+    lifecycle_source_before = tree_digest(source)
+    plugin_install = home / "plugins" / "skill-layers"
+    disable_output = call_hermes(root, ["plugins", "disable", "skill-layers"])
+    check(
+        "disabled" in (disable_output.stdout + disable_output.stderr).lower()
+        or "disable" in (disable_output.stdout + disable_output.stderr).lower(),
+        "Hermes did not acknowledge plugin disable",
+    )
+    disabled_view = json.loads(skill_view(selector))
+    check(disabled_view.get("success") is True, "Native view failed while plugin was disabled")
+    check(tree_bytes(export_dir) == export_bytes, "Disable changed the published export")
+    check(
+        tree_digest(source) == lifecycle_source_before,
+        "Disable changed the source bytes present at the lifecycle boundary",
+    )
+    passed("host-disable-native-view-and-export-preserved")
+
+    call_hermes(root, ["plugins", "enable", "skill-layers"], input_text="y\n")
+    reenabled_view = json.loads(skill_view(selector))
+    check(reenabled_view.get("success") is True, "Native view failed after plugin re-enable")
+    check(tree_bytes(export_dir) == export_bytes, "Re-enable changed the published export")
+    persisted = json_command(root, ["skill-layers", "list", "--json"])
+    check(
+        any(item.get("id") == layer_id for item in persisted.get("layers", [])),
+        "Plugin layer history did not persist across disable/re-enable",
+    )
+    check(
+        tree_digest(source) == lifecycle_source_before,
+        "Re-enable changed the source bytes present at the lifecycle boundary",
+    )
+    passed("host-reenable-layer-history-persisted")
+
+    call_hermes(root, ["plugins", "remove", "skill-layers"])
+    check(
+        not plugin_install.exists() and not plugin_install.is_symlink(),
+        "Public plugin removal left the plugin installed",
+    )
+    removed_view = json.loads(skill_view(selector))
+    check(removed_view.get("success") is True, "Native view failed after plugin removal")
+    check(tree_bytes(export_dir) == export_bytes, "Plugin removal changed the published export")
+    check(
+        tree_digest(source) == lifecycle_source_before,
+        "Plugin removal changed the source bytes present at the lifecycle boundary",
+    )
+    passed("host-remove-native-view-and-export-preserved")
+
     report["profile_id"] = host_probe["profile_id"]
     report["source_initial_sha256"] = source_before
     report["source_final_sha256"] = tree_digest(source)
