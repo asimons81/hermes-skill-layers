@@ -15,8 +15,9 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
 
 
 class RenameGuard:
-    def __init__(self, source: Path, target: Path) -> None:
+    def __init__(self, source: Path, target: Path, *, directory: bool = True) -> None:
         self.source, self.target = source, target
+        self.directory = directory
         self.source_fd: int | None = None
         self.target_fd: int | None = None
         self.windows_handles: list[int] = []
@@ -39,7 +40,7 @@ class RenameGuard:
                 (path, _identity(path.lstat())) for path in (self.source.parent, self.target.parent)
             ]
             source_info = self._source_stat()
-            if not stat.S_ISDIR(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode):
+            if not self._valid_source(source_info):
                 raise LayerError(
                     Code.RECOVERY_REQUIRED, "The staged export is not a real directory."
                 )
@@ -49,6 +50,13 @@ class RenameGuard:
         except BaseException:
             self.close()
             raise
+
+    def _valid_source(self, info: os.stat_result) -> bool:
+        return (
+            stat.S_ISDIR(info.st_mode)
+            if self.directory
+            else stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+        )
 
     def _source_stat(self) -> os.stat_result:
         if self.source_fd is not None:
@@ -72,7 +80,7 @@ class RenameGuard:
                         Code.PROFILE_MISMATCH, "The bound publication directory changed."
                     )
             source = self._source_stat()
-            if not stat.S_ISDIR(source.st_mode) or _identity(source) != self.source_identity:
+            if not self._valid_source(source) or _identity(source) != self.source_identity:
                 raise LayerError(
                     Code.RECOVERY_REQUIRED, "The staged directory changed before rename."
                 )

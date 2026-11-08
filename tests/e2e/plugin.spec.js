@@ -10,7 +10,7 @@ const ready = () => ({
 
 const conflict = () => ({
   ...ready(), state: 'needs_resolution', revision: 1, review_hash: 'review-hash-1', unresolved: ['SKILL.md'],
-  files: [{ path: 'SKILL.md', old_executable: false, new_executable: false, conflict: { kind: 'text', local_available: true, source_available: true }, diff: '<<<<<<< local\n<unsafe>\n=======\nsource\n>>>>>>> source\n' }]
+  files: [{ path: 'SKILL.md', old_executable: false, new_executable: false, conflict: { kind: 'text', local_available: true, source_available: true, sides: {base: {present:true,size:4,sha256:'basehash',execute_bits:0,text:'Original base'},local:{present:true,size:5,sha256:'localhash',execute_bits:0,text:'Local improvement'},source:{present:true,size:6,sha256:'sourcehash',execute_bits:0,text:'Source improvement'},proposal:{present:true,size:7,sha256:'proposalhash',execute_bits:0,text:'<<<<<<< LOCAL\n<img src=x onerror=alert(1)>\n||||||| BASE\nOriginal base\n=======\nSource improvement\n>>>>>>> SOURCE'}} }, diff: '<<<<<<< local\n<unsafe>\n=======\nsource\n>>>>>>> source\n' }]
 })
 
 async function prepare(page, fixture) {
@@ -56,6 +56,11 @@ test('recorded conflicts block publish until a whole-file resolution is reviewed
   await page.getByRole('button', { name: 'Review candidate' }).click()
   const publish = page.getByRole('button', { name: 'Publish reviewed skill' })
   await expect(publish).toBeDisabled()
+  await expect(page.getByText('Git proposal · 7 bytes · SHA-256 proposalhash', { exact: true })).toBeVisible()
+  await expect(page.locator('details[open] pre')).toContainText('<<<<<<< LOCAL')
+  await expect(page.locator('img')).toHaveCount(0)
+  await page.locator('summary').filter({ hasText: /^source ·/ }).click()
+  await expect(page.locator('details[open] pre').filter({hasText:'Source improvement'}).last()).toBeVisible()
   await expect(page.getByRole('button', { name: 'Keep local file' })).toBeEnabled()
   await page.getByRole('button', { name: 'Take source file' }).click()
   await expect(page.getByText('Unresolved: 0')).toBeVisible()

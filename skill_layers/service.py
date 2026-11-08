@@ -515,6 +515,11 @@ class Service:
                 }
                 for path, conflict in result.conflicts.items()
             }
+            for path, conflict in result.conflicts.items():
+                if conflict.proposal is not None:
+                    proposal = make_snapshot({path: conflict.proposal}, "normalized")
+                    self.store.save_snapshot(proposal)
+                    conflicts[path]["proposal_snapshot"] = proposal.digest
             proposed_local, associated = local, source.digest
         else:
             checkpoint = self.store.get("checkpoints", _uuid(parameters.get("checkpoint_id", "")))
@@ -809,6 +814,35 @@ class Service:
                 raise LayerError(
                     Code.RECOVERY_REQUIRED, "The operation staging location is inconsistent."
                 )
+            if operation["phase"] == "intended" and not (target.exists() or target.is_symlink()):
+                # No rename is attempted until the staged phase is durably committed.
+                # Preserve even partial/unowned stage files; a fresh request uses a new stage.
+                current = self.store.get("candidates", candidate["id"])
+                if current["operation_id"] != operation["id"] or current["state"] != "publishing":
+                    raise LayerError(
+                        Code.RECOVERY_REQUIRED, "Another operation owns this candidate."
+                    )
+                current.update(state="ready", operation_id=None)
+                error = self._error(
+                    LayerError(
+                        Code.RECOVERY_REQUIRED,
+                        "Publication stopped before staging committed. Any partial stage was "
+                        "preserved; review again and publish with a new request ID.",
+                        details={"preserved_stage": str(expected_stage)},
+                    ),
+                    operation["id"],
+                )
+                operation.update(phase="failed", error=error)
+                self.store.put("candidates", current["id"], current)
+                self.store.put("operations", operation["id"], operation)
+                recovered.append(
+                    {
+                        "operation_id": operation["id"],
+                        "state": "aborted_before_stage_commit",
+                        "preserved_stage": str(expected_stage),
+                    }
+                )
+                continue
             location = (
                 target if target.exists() or target.is_symlink() else Path(operation["stage"])
             )
@@ -904,7 +938,21 @@ class Service:
             proposed = self.store.load_snapshot(candidate["result_snapshot"]).tree
         old_hash = candidate["inputs"]["current_snapshot"]
         old = self.store.load_snapshot(old_hash).tree if old_hash else {}
-        paths = sorted(set(old) | set(proposed))
+        paths = sorted(set(old) | set(proposed) | set(candidate["conflicts"]))
+        conflict_sides = (
+            {
+                side: normalize_tree(self.store.load_snapshot(candidate[key]).tree)
+                if candidate[key]
+                else {}
+                for side, key in (
+                    ("base", "base_snapshot"),
+                    ("local", "local_snapshot"),
+                    ("source", "source_snapshot"),
+                )
+            }
+            if candidate["conflicts"]
+            else {}
+        )
         files = []
         remaining = 24_000 if bounded else None
         truncated = False
@@ -922,6 +970,50 @@ class Service:
                 "old_sha256": hashlib.sha256(before.content).hexdigest() if before else None,
                 "new_sha256": hashlib.sha256(after.content).hexdigest() if after else None,
             }
+            if item["conflict"]:
+                item["conflict"] = dict(item["conflict"])
+                sides = {side: tree.get(path) for side, tree in conflict_sides.items()}
+                proposal_snapshot = item["conflict"].get("proposal_snapshot")
+                sides["proposal"] = (
+                    self.store.load_snapshot(proposal_snapshot).tree.get(path)
+                    if proposal_snapshot
+                    else None
+                )
+                previews: Record = {}
+                for side, file in sides.items():
+                    if file is None:
+                        previews[side] = {"present": False}
+                        continue
+                    preview: Record = {
+                        "present": True,
+                        "sha256": hashlib.sha256(file.content).hexdigest(),
+                        "size": len(file.content),
+                        "execute_bits": file.execute_bits,
+                    }
+                    try:
+                        text = file.content.decode("utf-8")
+                        if any(ord(char) < 32 and char not in "\t\r\n" for char in text):
+                            raise UnicodeError()
+                        limit = len(text) if remaining is None else max(0, remaining)
+                        preview["text"] = text[:limit]
+                        preview["truncated"] = len(text) > limit
+                        truncated |= preview["truncated"]
+                        if remaining is not None:
+                            remaining -= len(preview["text"])
+                    except UnicodeError:
+                        preview["binary"] = True
+                    previews[side] = preview
+                item["conflict"]["sides"] = previews
+                item["resolution_required"] = True
+                item["diff"] = (
+                    "Unresolved conflict: review base, local, source and the Git proposal "
+                    "before choosing a whole-file resolution."
+                )
+                files.append(item)
+                if bounded and (len(files) >= 100 or remaining == 0):
+                    truncated = True
+                    break
+                continue
             try:
                 left = before.content.decode("utf-8") if before else ""
                 right = after.content.decode("utf-8") if after else ""

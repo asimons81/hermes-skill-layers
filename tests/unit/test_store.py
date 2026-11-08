@@ -213,3 +213,30 @@ def test_explicit_schema_migration_backs_up_existing_database(tmp_path, monkeypa
         assert migrated.execute("SELECT value FROM legacy_state").fetchone()[0] == "preserve"
     finally:
         migrated.close()
+
+
+def test_content_object_crash_after_atomic_move_remains_readable(tmp_path, monkeypatch):
+    from skill_layers import publish
+
+    _, store = _initialized_store(tmp_path, monkeypatch)
+    content = b"Durable object after rename"
+    digest = hashlib.sha256(content).hexdigest()
+    original = publish.rename_new
+
+    class Crash(BaseException):
+        pass
+
+    def move_then_crash(source, target, guard):
+        original(source, target, guard)
+        raise Crash()
+
+    monkeypatch.setattr(publish, "rename_new", move_then_crash)
+    with pytest.raises(Crash):
+        store._write_object(content, digest)
+    path = store._object_path(digest)
+    assert path.stat().st_nlink == 1
+    assert store._verify_object(path, digest) == content
+    monkeypatch.setattr(publish, "rename_new", original)
+    store._write_object(content, digest)
+    assert list(path.parent.glob(".object-*")) == []
+    store.close()

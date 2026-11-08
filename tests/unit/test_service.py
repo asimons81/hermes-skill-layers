@@ -163,6 +163,15 @@ def test_recorded_conflict_and_review_hash_gate(workspace):
         expected_profile=service.scope.id,
     )
     assert refused["error"]["code"] == "CONFLICTS_UNRESOLVED"
+    conflict_file = next(file for file in review["files"] if file["path"] == "SKILL.md")
+    sides = conflict_file["conflict"]["sides"]
+    assert "# Notes" in sides["base"]["text"]
+    assert "# Local" in sides["local"]["text"]
+    assert "# Upstream" in sides["source"]["text"]
+    assert "<<<<<<< LOCAL" in sides["proposal"]["text"]
+    assert "||||||| BASE" in sides["proposal"]["text"]
+    assert conflict_file["resolution_required"]
+    assert "--- before/" not in conflict_file["diff"]
     resolved = act(
         service,
         "resolve",
@@ -245,7 +254,12 @@ def test_crash_recovery_preserves_source_and_prior_exports(workspace, point):
     service.hooks.clear()
     result = service.mutate("recover", {}, expected_profile=service.scope.id)
     if point == "before_stage":
-        assert result["error"]["code"] == "RECOVERY_REQUIRED"
+        assert result["ok"], result
+        assert any(
+            item["state"] == "aborted_before_stage_commit" for item in result["data"]["operations"]
+        )
+        assert service.store.get("candidates", candidate["candidate_id"])["state"] == "ready"
+        publish(service, candidate["candidate_id"])
     else:
         assert result["ok"], result
         latest = service.store.get("layers", first["layer_id"])
@@ -451,4 +465,46 @@ def test_destination_parent_swap_fails_without_outside_write(workspace, replacem
         assert list(scope.skills_dir.iterdir()) == []
     assert sorted(path.name for path in moved.iterdir()) == [Path(old["directory"]).name]
     assert (moved / Path(old["directory"]).name / "SKILL.md").read_bytes() == original_bytes
+    assert (source / "SKILL.md").read_bytes() == V1
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_storage_failure_before_stage_commit_can_retry(workspace, monkeypatch, partial):
+    import errno
+
+    import skill_layers.service as module
+
+    service, source, _ = workspace
+    first, old = derive(service)
+    candidate = act(service, "refresh", layer_id=first["layer_id"])
+    review = service.read("diff", candidate["candidate_id"])["data"]
+    original_stage = module.stage_export
+    preserved = []
+
+    def fail(stage, tree, marker):
+        if partial:
+            stage.mkdir()
+            (stage / "partial.txt").write_bytes(b"Preserve me")
+            preserved.append(stage)
+        raise OSError(errno.ENOSPC, "Simulated disk full")
+
+    monkeypatch.setattr(module, "stage_export", fail)
+    failed = service.mutate(
+        "publish",
+        {
+            "candidate_id": candidate["candidate_id"],
+            "revision": review["revision"],
+            "review_hash": review["review_hash"],
+        },
+        expected_profile=service.scope.id,
+    )
+    assert failed["error"]["code"] == "STORAGE_ERROR"
+    recovered = act(service, "recover", operation_id=failed["operation_id"])
+    assert recovered["operations"][0]["state"] == "aborted_before_stage_commit"
+    monkeypatch.setattr(module, "stage_export", original_stage)
+    fresh = publish(service, candidate["candidate_id"])
+    assert Path(fresh["directory"]).is_dir()
+    assert Path(old["directory"]).is_dir()
+    for stage in preserved:
+        assert (stage / "partial.txt").read_bytes() == b"Preserve me"
     assert (source / "SKILL.md").read_bytes() == V1

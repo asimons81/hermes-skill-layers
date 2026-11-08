@@ -130,9 +130,10 @@ def copy_finite_payload(destination: Path) -> None:
 def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, str]:
     """Return a child-only env mapping; never mutate this process environment."""
     env = dict(os.environ)
-    profile.mkdir(parents=True, exist_ok=False)
-    os_home.mkdir(parents=True, exist_ok=False)
-    runtime.mkdir(parents=True, exist_ok=False)
+    if not profile.is_dir():
+        raise QAError("Disposable profile was not created through Hermes' profile command")
+    os_home.mkdir(parents=True, exist_ok=True)
+    runtime.mkdir(parents=True, exist_ok=True)
     env["HERMES_HOME"] = str(profile)
     env["HERMES_RUNTIME_DIR"] = str(runtime)
     env["HOME"] = str(os_home)
@@ -148,6 +149,71 @@ def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, 
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["NO_COLOR"] = "1"
     return env
+
+
+def create_named_profiles(
+    *, hermes_root: Path, run_root: Path, names: tuple[str, ...]
+) -> tuple[Path, Path, Path]:
+    """Create real named profiles under one isolated Hermes root using its public CLI."""
+    hermes_home = run_root / "hermes-home"
+    os_home = run_root / "os-home"
+    runtime = run_root / "runtime"
+    for directory in (hermes_home, os_home, runtime):
+        directory.mkdir(parents=True, exist_ok=False)
+    env = dict(os.environ)
+    env.update(
+        {
+            "HERMES_HOME": str(hermes_home),
+            "HERMES_RUNTIME_DIR": str(runtime),
+            "HOME": str(os_home),
+            "USERPROFILE": str(os_home),
+            "APPDATA": str(os_home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(os_home / "AppData" / "Local"),
+            "XDG_CONFIG_HOME": str(os_home / ".config"),
+            "XDG_CACHE_HOME": str(os_home / ".cache"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "NO_COLOR": "1",
+        }
+    )
+    for key in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "__HERMES_ACTIVATED"):
+        env.pop(key, None)
+    for name in names:
+        command = [
+            "python",
+            "-m",
+            "hermes_cli.main",
+            "profile",
+            "create",
+            name,
+            "--no-alias",
+            "--no-skills",
+        ]
+        psfile = run_root / f"create-{name}.ps1" if os.name == "nt" else None
+        result = subprocess.run(
+            host_command(hermes_root, command, windows_script=psfile),
+            cwd=str(hermes_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode:
+            tail = _redact(result.stdout + "\n" + result.stderr, [hermes_home, os_home, runtime])
+            raise QAError(f"Hermes public profile create failed for {name}: {tail[-1800:]}")
+        created = hermes_home / "profiles" / name
+        if not created.is_dir() or not any(
+            (created / marker).is_file()
+            for marker in (
+                "config.yaml",
+                ".env",
+                "SOUL.md",
+                "profile.yaml",
+                "auth.json",
+                "state.db",
+            )
+        ):
+            raise QAError(f"Hermes profile create omitted the expected live identity for {name}")
+    return hermes_home, os_home, runtime
 
 
 def _ps_literal(value: str) -> str:
@@ -211,18 +277,14 @@ def run_profile(
     plugin_commit: str,
     plugin_hash: str,
 ) -> dict[str, Any]:
-    profile = run_root / "profiles" / variant
-    os_home = run_root / "os-home" / variant
-    runtime = run_root / "runtime" / variant
-    payload = run_root / "payload" / variant / "skill-layers"
-    for parent in (profile.parent, os_home.parent, runtime.parent, payload.parent):
-        parent.mkdir(parents=True, exist_ok=True)
+    profile = run_root / "hermes-home" / "profiles" / variant
+    os_home = run_root / "os-home"
+    runtime = run_root / "runtime"
     env = clean_environment(profile, os_home, runtime)
-    shutil.copytree(plugin_snapshot, payload)
-    # Hermes plugin discovery accepts only this disposable copy. Never link the development root.
+    # Reuse one finite disposable payload tree; never link the development project root.
     target = profile / "plugins" / "skill-layers"
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(payload, target)
+    target.symlink_to(plugin_snapshot, target_is_directory=True)
     guard = run_root / "offline-guard"
     guard.mkdir(parents=True, exist_ok=True)
     attempts = run_root / f"{variant}-network-attempts.txt"
@@ -399,6 +461,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Hermes: {pin_name} {commit}; platform={platform.platform()}")
         print(f"Plugin: commit={plugin_commit}; finite-payload-sha256={plugin_hash}")
+        create_named_profiles(
+            hermes_root=hermes_root,
+            run_root=run_root,
+            names=("profile-a", "profile-b"),
+        )
         reports = []
         reports.append(
             run_profile(

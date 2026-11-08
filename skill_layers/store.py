@@ -475,10 +475,14 @@ class Store:
                 stream.flush()
                 os.fsync(stream.fileno())
             try:
-                os.link(temporary, target, follow_symlinks=False)
+                from .publish import rename_new
+                from .rename_guard import RenameGuard
+
+                with RenameGuard(temporary, target, directory=False) as guard:
+                    rename_new(temporary, target, guard)
             except FileExistsError:
                 self._verify_object(target, digest)
-            temporary.unlink()
+            temporary.unlink(missing_ok=True)
             self._fsync_dir(target.parent)
         except OSError as exc:
             temporary.unlink(missing_ok=True)

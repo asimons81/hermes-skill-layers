@@ -47,12 +47,38 @@ def test_finite_payload_excludes_project_state_and_python_caches(tmp_path, monke
 def test_environment_roots_are_child_only_and_not_project_links(tmp_path, monkeypatch):
     before = dict(__import__("os").environ)
     monkeypatch.setattr(qa, "os", __import__("os"))
-    env = qa.clean_environment(tmp_path / "profile", tmp_path / "home", tmp_path / "runtime")
-    assert env["HERMES_HOME"] == str(tmp_path / "profile")
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    env = qa.clean_environment(profile, tmp_path / "home", tmp_path / "runtime")
+    assert env["HERMES_HOME"] == str(profile)
     assert env["HOME"] == str(tmp_path / "home")
     assert "PYTHONPATH" not in env
     assert dict(__import__("os").environ) == before
-    assert not (tmp_path / "profile").is_symlink()
+    assert not profile.is_symlink()
+
+
+def test_profile_setup_uses_public_command_and_shared_install_root(tmp_path, monkeypatch):
+    commands = []
+
+    def fake_run(command, *, cwd, env, capture_output, text, timeout):
+        commands.append((command, cwd, env["HERMES_HOME"], env["HERMES_RUNTIME_DIR"]))
+        name = command[command.index("create") + 1]
+        profile = Path(env["HERMES_HOME"]) / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / ".env").write_text("", encoding="utf-8")
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(qa.subprocess, "run", fake_run)
+    monkeypatch.setattr(qa, "host_command", lambda _root, command, **_kwargs: command)
+    home, os_home, runtime = qa.create_named_profiles(
+        hermes_root=tmp_path / "host", run_root=tmp_path / "run", names=("profile-a", "profile-b")
+    )
+    assert (home / "profiles" / "profile-a" / ".env").is_file()
+    assert (home / "profiles" / "profile-b" / ".env").is_file()
+    assert os_home.is_dir() and runtime.is_dir()
+    assert len(commands) == 2
+    assert all(command[0:3] == ["python", "-m", "hermes_cli.main"] for command, *_ in commands)
+    assert len({runtime_path for _, _, _, runtime_path in commands}) == 1
 
 
 def test_pin_verification_requires_the_exact_host_module_layout(tmp_path, monkeypatch):
