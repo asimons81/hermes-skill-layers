@@ -16,10 +16,9 @@ _WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="requires the real Wi
 
 
 def _make_junction(junction: Path, target: Path) -> None:
-    """Create an NTFS directory junction; skip only when this runner lacks that primitive."""
-    command = f'mklink /J "{junction}" "{target}"'
+    """Create the required NTFS test primitive without double-quoting cmd arguments."""
     result = subprocess.run(
-        ["cmd.exe", "/c", command],
+        ["cmd.exe", "/c", "mklink", "/J", str(junction), str(target)],
         check=False,
         capture_output=True,
         text=True,
@@ -27,7 +26,7 @@ def _make_junction(junction: Path, target: Path) -> None:
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
-        pytest.skip(f"directory junction creation unavailable: {detail}")
+        pytest.fail(f"Required Windows junction creation failed: {detail}")
 
 
 def _remove_junction(path: Path) -> None:
