@@ -222,7 +222,6 @@ def merge_trees(base: Tree, local: Tree, source: Tree) -> MergeResult:
                     details={"path": path, "limit_bytes": MAX_FILE_BYTES},
                 )
 
-        _validate_execute_support(base_file, local_file, source_file)
         if _same_file(local_file, base_file):
             if source_file is not None:
                 result[path] = source_file
@@ -275,18 +274,6 @@ def _same_file(left: TreeFile | None, right: TreeFile | None) -> bool:
     if left is None or right is None:
         return left is right
     return left.content == right.content and _execute_bits(left) == _execute_bits(right)
-
-
-def _validate_execute_support(*files: TreeFile | None) -> None:
-    if os.name != "nt":
-        return
-    for file in files:
-        if file is not None and _execute_bits(file) not in (0, 0o111):
-            raise LayerError(
-                Code.UNSUPPORTED_SOURCE,
-                "This Windows host cannot represent per-class POSIX execute bits.",
-                details={"execute_bits": file.execute_bits},
-            )
 
 
 def _merge_executable(base: int, local: int, source: int) -> tuple[int, bool]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import types
 from pathlib import Path
@@ -409,4 +410,45 @@ def test_concurrent_publications_choose_one_preferred_export(workspace):
     )
     assert len(service.store.list("exports")) == 2
     assert Path(original["directory"]).is_dir()
+    assert (source / "SKILL.md").read_bytes() == V1
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX directory-swap race; Windows holds deny-delete handles"
+)
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_destination_parent_swap_fails_without_outside_write(workspace, replacement):
+    service, source, scope = workspace
+    first, old = derive(service)
+    original_bytes = (Path(old["directory"]) / "SKILL.md").read_bytes()
+    candidate = act(service, "refresh", layer_id=first["layer_id"])
+    review = service.read("diff", candidate["candidate_id"])["data"]
+    outside = scope.home.parent / "outside"
+    outside.mkdir()
+    moved = scope.home / "original-skills"
+
+    def swap():
+        scope.skills_dir.rename(moved)
+        if replacement == "symlink":
+            scope.skills_dir.symlink_to(outside, target_is_directory=True)
+        else:
+            scope.skills_dir.mkdir()
+
+    service.hooks["after_final_check"] = swap
+    result = service.mutate(
+        "publish",
+        {
+            "candidate_id": candidate["candidate_id"],
+            "revision": review["revision"],
+            "review_hash": review["review_hash"],
+        },
+        expected_profile=scope.id,
+    )
+    assert not result["ok"]
+    assert result["error"]["code"] == "PROFILE_MISMATCH"
+    assert list(outside.iterdir()) == []
+    if replacement == "directory":
+        assert list(scope.skills_dir.iterdir()) == []
+    assert sorted(path.name for path in moved.iterdir()) == [Path(old["directory"]).name]
+    assert (moved / Path(old["directory"]).name / "SKILL.md").read_bytes() == original_bytes
     assert (source / "SKILL.md").read_bytes() == V1

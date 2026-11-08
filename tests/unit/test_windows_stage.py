@@ -24,6 +24,15 @@ def _junction(link: Path, target: Path) -> None:
 
 
 @WINDOWS_ONLY
+def test_stage_new_rejects_execute_metadata_before_creating_tree(tmp_path: Path) -> None:
+    stage = tmp_path / "unsupported-mode"
+    with pytest.raises(LayerError) as error:
+        stage_new(stage, {"run.sh": TreeFile(b"data\n", execute_bits=0o100)})
+    assert error.value.code == Code.UNSUPPORTED_SOURCE.value
+    assert not stage.exists()
+
+
+@WINDOWS_ONLY
 def test_stage_new_writes_binary_tree_under_unicode_path(tmp_path: Path) -> None:
     stage = tmp_path / "stage space – 日本語"
     payload = b"\x00\xffbinary\r\n"

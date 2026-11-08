@@ -10,7 +10,7 @@ import pytest
 
 from skill_layers import windows_capture
 from skill_layers.contracts import Code, LayerError
-from skill_layers.windows_capture import open_verified
+from skill_layers.windows_capture import open_verified, stream_fingerprint
 
 _WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="requires the real Win32 file APIs")
 
@@ -61,6 +61,23 @@ def test_verified_open_supports_spaces_non_ascii_and_returns_readable_stream(
 
     with open_verified(target, root) as stream:
         assert stream.read() == content
+
+
+@_WINDOWS_ONLY
+def test_handle_fingerprint_is_stable_and_tracks_same_handle_changes(tmp_path: Path) -> None:
+    root = tmp_path / "skill"
+    root.mkdir()
+    target = root / "entry.txt"
+    target.write_bytes(b"before\n")
+
+    with open_verified(target, root) as stream:
+        before = stream_fingerprint(stream)
+        assert stream_fingerprint(stream) == before
+        target.write_bytes(b"after with a different size\n")
+        after = stream_fingerprint(stream)
+
+    assert after[:2] == before[:2]
+    assert after != before
 
 
 @_WINDOWS_ONLY

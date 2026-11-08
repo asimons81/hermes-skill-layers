@@ -1,9 +1,11 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 
+from skill_layers import windows_capture
 from skill_layers.contracts import LayerError, TreeFile
 from skill_layers.snapshots import (
     capture_tree,
@@ -128,6 +130,35 @@ def test_capture_detects_tree_change_during_scan(tmp_path, monkeypatch):
     with pytest.raises(LayerError) as error:
         capture_tree(root)
     assert error.value.code == "STALE_INPUT"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 handle capture")
+def test_windows_capture_rejects_replacement_between_scan_and_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    target = root / "SKILL.md"
+    target.write_bytes(b"original content\n")
+    create_handle = windows_capture._create_file_handle
+    replaced = False
+
+    def replace_before_leaf_open(path: str, access: int, share: int, flags: int) -> int:
+        nonlocal replaced
+        if flags == windows_capture.FILE_FLAG_OPEN_REPARSE_POINT and not replaced:
+            old = root / "SKILL.old"
+            os.replace(target, old)
+            target.write_bytes(b"replacement has another length\n")
+            replaced = True
+        return create_handle(path, access, share, flags)
+
+    monkeypatch.setattr(windows_capture, "_create_file_handle", replace_before_leaf_open)
+    with pytest.raises(LayerError) as error:
+        capture_tree(root)
+
+    assert replaced
+    assert error.value.code == "STALE_INPUT"
+    assert target.read_bytes() == b"replacement has another length\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Uses POSIX descriptor-relative directory opens")

@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from .contracts import MARKER, Code, LayerError, ProfileScope, Record, Tree
+from .rename_guard import RenameGuard
 
 NAME_RE = re.compile(r"sl-[a-z0-9-]{1,60}\Z")
 
@@ -32,32 +33,41 @@ def sync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def rename_new(source: Path, destination: Path) -> None:
-    """Atomically rename a directory, refusing even an empty existing destination."""
+def rename_new(source: Path, destination: Path, guard: RenameGuard) -> None:
+    """Rename relative to held parents; refuse even an empty existing destination."""
+    guard.verify()
     if os.name == "nt":
-        os.rename(source, destination)  # Windows refuses an existing destination.
+        os.rename(source, destination)  # Held ancestor handles prohibit directory swaps.
         return
+    if guard.source_fd is None or guard.target_fd is None:
+        raise LayerError(Code.RECOVERY_REQUIRED, "Publication directory handles are missing.")
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin":
-        rename = getattr(libc, "renamex_np", None)
-        arguments = (os.fsencode(source), os.fsencode(destination), 0x00000004)
-        types = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename = getattr(libc, "renameatx_np", None)
+        flags = 0x00000004  # RENAME_EXCL, verified in the macOS SDK sys/stdio.h.
     elif sys.platform.startswith("linux"):
         rename = getattr(libc, "renameat2", None)
-        arguments = (-100, os.fsencode(source), -100, os.fsencode(destination), 1)
-        types = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        flags = 1  # RENAME_NOREPLACE
     else:
         rename = None
-        arguments = ()
-        types = []
+        flags = 0
     if rename is None:
         raise LayerError(
             Code.DEPENDENCY_MISSING,
             "This platform lacks the required no-replace directory rename primitive.",
         )
-    rename.argtypes = types
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
-    if rename(*arguments) != 0:
+    if (
+        rename(
+            guard.source_fd,
+            os.fsencode(source.name),
+            guard.target_fd,
+            os.fsencode(destination.name),
+            flags,
+        )
+        != 0
+    ):
         number = ctypes.get_errno()
         raise OSError(number, os.strerror(number))
 
@@ -142,13 +152,26 @@ def stage_export(stage: Path, tree: Tree, marker: Record) -> None:
     sync_directory(stage.parent)
 
 
-def finish_rename(stage: Path, target: Path) -> None:
+def finish_rename(stage: Path, target: Path, *, guard: RenameGuard | None = None) -> None:
+    if guard is None:
+        with RenameGuard(stage, target) as bound:
+            finish_rename(stage, target, guard=bound)
+        return
     try:
-        if stage.stat().st_dev != target.parent.stat().st_dev:
+        guard.verify()
+        if guard.source_identity is None:
+            raise LayerError(Code.RECOVERY_REQUIRED, "The staged directory identity is missing.")
+        target_device = (
+            os.fstat(guard.target_fd).st_dev
+            if guard.target_fd is not None
+            else target.parent.stat().st_dev
+        )
+        if guard.source_identity[0] != target_device:
             raise OSError(errno.EXDEV, "Staging and destination are on different filesystems")
-        rename_new(stage, target)
-        sync_directory(target.parent)
-        sync_directory(stage.parent)
+        rename_new(stage, target, guard)
+        if guard.target_fd is not None and guard.source_fd is not None:
+            os.fsync(guard.target_fd)
+            os.fsync(guard.source_fd)
     except FileExistsError as exc:
         raise LayerError(
             Code.DESTINATION_EXISTS, "The destination already exists; nothing replaced."

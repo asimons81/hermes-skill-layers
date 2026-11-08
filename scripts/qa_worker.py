@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +98,131 @@ def json_envelope(root: Path, args: list[str], *, guard: Path | None = None) -> 
 
 def json_command(root: Path, args: list[str], *, guard: Path | None = None) -> dict[str, Any]:
     return json_envelope(root, args, guard=guard).get("data", {})
+
+
+def fresh_host_verification(root: Path) -> dict[str, Any]:
+    """Re-enter the documented PM helper after admission so Python sees its new generation."""
+    script = textwrap.dedent(
+        """
+        import json, os, socket
+        log_path = os.environ['QA_NETWORK_ATTEMPTS']
+        def denied(*_args, **_kwargs):
+            with open(log_path, 'a', encoding='utf-8') as stream:
+                stream.write('socket\\n')
+            raise OSError('Skill Layers QA denied outbound networking')
+        socket.socket.connect = denied
+        socket.socket.connect_ex = denied
+        socket.create_connection = denied
+        import hermes_cli.main as host_main
+        from skill_layers.plugin import _read_tool
+        from fastapi.testclient import TestClient
+        from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
+        read_result = json.loads(_read_tool('list', {}))
+        with TestClient(app) as client:
+            path = '/api/plugins/skill-layers/layers'
+            accepted = client.get(path, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
+            denied_response = client.get(path)
+            wrong_scope = client.post(
+                '/api/plugins/skill-layers/checkpoint',
+                json={
+                    'layer_id': '00000000-0000-4000-8000-000000000000',
+                    'expected_profile': 'profile-not-this-one',
+                    'request_id': '8bcd2b06-e6f5-4c64-839f-3469514d9559',
+                },
+                headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
+            )
+        spec = __import__('importlib.util').util.find_spec('skill_layers')
+        expected_host = os.path.join(os.environ['QA_HERMES_ROOT'], 'hermes_cli', 'main.py')
+        host_matches = os.path.realpath(host_main.__file__) == expected_host
+        package_origin = spec.origin.replace('\\\\', '/') if spec else ''
+        package_is_shared = bool(
+            spec and '/plugins/skill-layers/skill_layers/' not in package_origin
+        )
+        loaded = {
+            'host_module_matches_checkout': host_matches,
+            'shared_package_loaded': spec is not None,
+            'shared_package_outside_plugin_install': package_is_shared,
+            'tool_ok': read_result.get('ok') is True,
+            'tool_bounded': len(json.dumps(read_result).encode('utf-8')) <= 32768,
+            'profile_id': read_result.get('profile_id'),
+            'authenticated_status': accepted.status_code,
+            'authenticated_ok': accepted.status_code == 200 and accepted.json().get('ok') is True,
+            'unauthenticated_status': denied_response.status_code,
+            'profile_mismatch_status': wrong_scope.status_code,
+            'profile_mismatch_code': wrong_scope.json().get('error', {}).get('code'),
+        }
+        print(json.dumps(loaded, sort_keys=True))
+        """
+    )
+    env = dict(os.environ)
+    command: list[str]
+    if os.name != "nt":
+        helper = root / "scripts" / "run-in-hermes-env"
+        command = [str(helper), "python", "-c", script]
+    else:
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            raise RuntimeError("Windows QA needs PowerShell for PM environment refresh")
+        script_path = Path(os.environ["HERMES_HOME"]) / "qa-fresh-python.ps1"
+        activate = root / "activate.ps1"
+
+        def ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        python_code = ps_quote(script)
+        ps_script = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f". {ps_quote(str(activate))}\n"
+            "$qaPython = if ($env:PYTHON) { $env:PYTHON } else { 'python' }\n"
+            f"& $qaPython -c {python_code}\n"
+            "exit $LASTEXITCODE\n"
+        )
+        script_path.write_text(ps_script, encoding="utf-8")
+        command = [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+        ]
+    result = subprocess.run(
+        command, cwd=root, env=env, capture_output=True, text=True, timeout=300, check=False
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"Fresh PM generation probe failed: exit={result.returncode}; "
+            f"stdout-tail={result.stdout[-1600:]!r}; stderr-tail={result.stderr[-1600:]!r}"
+        )
+    report = None
+    for line in reversed((result.stdout + "\n" + result.stderr).splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "shared_package_loaded" in candidate:
+            report = candidate
+            break
+    if report is None:
+        raise RuntimeError(
+            "Fresh PM generation probe omitted JSON evidence; "
+            f"stdout-tail={result.stdout[-1200:]!r}; stderr-tail={result.stderr[-1200:]!r}"
+        )
+    if not report.get("host_module_matches_checkout") or not report.get("shared_package_loaded"):
+        raise RuntimeError("Fresh PM Python cannot import the admitted shared package")
+    if not report.get("shared_package_outside_plugin_install"):
+        raise RuntimeError("Shared package import resolved inside plugin installation directory")
+    if not report.get("tool_ok") or not report.get("tool_bounded"):
+        raise RuntimeError("Read-only registered tool failed or exceeded its output bound")
+    if not report.get("authenticated_ok") or report.get("unauthenticated_status") != 401:
+        raise RuntimeError("Real host plugin API authentication probe failed")
+    if (
+        report.get("profile_mismatch_status") != 409
+        or report.get("profile_mismatch_code") != "PROFILE_MISMATCH"
+    ):
+        raise RuntimeError("Real host API did not reject mismatched profile mutation scope")
+    return report
 
 
 def run() -> dict[str, Any]:
@@ -529,44 +656,19 @@ def run() -> dict[str, Any]:
     check(tree_digest(source) == source_conflict, "Rollback changed source bytes")
     passed("rollback-fresh-identity-checkpoint-preserved-prior-exports")
 
-    # Read-only tool invocation must not mutate plugin DB, snapshots or skill trees.
+    # Re-enter Hermes through the documented helper after PM admission. The long-lived
+    # worker retains the previous generation, so this child verifies shared imports and
+    # backend auth without modifying sys.path.
     plugin_data = home / "plugin-data" / "skill-layers"
     before_read = tree_digest(plugin_data)
-    from skill_layers.plugin import _read_tool
-
-    listed_tool = json.loads(_read_tool("list", {}))
-    check(listed_tool.get("ok") is True, "Read-only registered agent tool failed")
+    skills_before_read = tree_digest(home / "skills")
+    host_probe = fresh_host_verification(root)
     after_read = tree_digest(plugin_data)
+    skills_after_read = tree_digest(home / "skills")
     check(before_read == after_read, "Read-only agent tool mutated plugin-owned files")
+    check(skills_before_read == skills_after_read, "Read-only agent tool mutated profile skills")
     passed("readonly-bounded-agent-tool-no-filesystem-mutation")
-
-    # Exercise real mounted route authentication, then profile mismatch rejection.
-    from fastapi.testclient import TestClient
-    from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app  # type: ignore[import-not-found]
-
-    with TestClient(app) as client:
-        route = "/api/plugins/skill-layers/layers"
-        auth = client.get(route, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
-        unauth = client.get(route)
-        check(
-            auth.status_code == 200 and auth.json().get("ok") is True,
-            "Authenticated mounted plugin route failed",
-        )
-        check(unauth.status_code == 401, "Mounted plugin route accepted unauthenticated request")
-        wrong_scope = client.post(
-            "/api/plugins/skill-layers/checkpoint",
-            json={
-                "layer_id": layer_id,
-                "expected_profile": "profile-not-this-one",
-                "request_id": "8bcd2b06-e6f5-4c64-839f-3469514d9559",
-            },
-            headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
-        )
-        check(
-            wrong_scope.status_code == 409
-            and wrong_scope.json().get("error", {}).get("code") == "PROFILE_MISMATCH",
-            "Mutation did not reject mismatched profile context",
-        )
+    check(host_probe.get("profile_id"), "Read-only tool omitted profile identity")
     passed("real-host-api-auth-profile-scope")
 
     # T17 uses only controlled synthetic skills and the disposable profile. Lock refusal
@@ -701,9 +803,7 @@ def run() -> dict[str, Any]:
         "A plugin workflow attempted outbound networking",
     )
     passed("plugin-owned-workflow-outbound-network-denied")
-    report["profile_id"] = json_envelope(
-        root, ["skill-layers", "list", "--json"], guard=WORKFLOW_GUARD
-    )["profile_id"]
+    report["profile_id"] = host_probe["profile_id"]
     report["source_initial_sha256"] = source_before
     report["source_final_sha256"] = tree_digest(source)
     report["published_selectors"] = [

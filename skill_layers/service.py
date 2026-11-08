@@ -35,6 +35,7 @@ from .publish import (
     staging_location,
     verify_marker,
 )
+from .rename_guard import RenameGuard
 from .snapshots import capture_tree, make_snapshot, validate_path, validate_tree
 from .sources import Discovery, current_scope, source_from_record, source_to_record
 from .store import Store
@@ -714,7 +715,7 @@ class Service:
             operation["phase"] = "staged"
             self.store.put("operations", operation["id"], operation)
         self._hook("before_final_check")
-        with self.store.transaction():
+        with self.store.transaction(), RenameGuard(stage, target) as rename_guard:
             fresh = self.store.get("candidates", candidate["id"])
             if (
                 fresh["operation_id"] != operation["id"]
@@ -727,7 +728,7 @@ class Service:
             self._verify_staged_export(stage, export, snapshot.digest)
             self._hook("after_final_check")
             self._hook("before_rename")
-            finish_rename(stage, target)
+            finish_rename(stage, target, guard=rename_guard)
             self._hook("after_rename")
             self.discovery.verify_export(export["selector"], target)
             self._commit_export(candidate, operation, export)
@@ -840,8 +841,10 @@ class Service:
                         Code.RECOVERY_REQUIRED, "The layer changed during interrupted publication."
                     )
                 if location != target:
-                    self._check_inputs(candidate)
-                    finish_rename(location, target)
+                    with RenameGuard(location, target) as rename_guard:
+                        self._check_inputs(candidate)
+                        self._verify_staged_export(location, export, operation["expected_snapshot"])
+                        finish_rename(location, target, guard=rename_guard)
                 self.discovery.verify_export(export["selector"], target)
                 self._commit_export(candidate, operation, export)
             recovered.append({"operation_id": operation["id"], "state": "committed"})

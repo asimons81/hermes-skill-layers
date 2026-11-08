@@ -54,6 +54,13 @@ def _kernel32() -> Any:
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
     kernel.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
     kernel.GetFileType.argtypes = [wintypes.HANDLE]
     kernel.GetFileType.restype = wintypes.DWORD
     kernel.GetFinalPathNameByHandleW.argtypes = [
@@ -132,6 +139,51 @@ def _file_information(handle: int) -> Any:
     if not _kernel32().GetFileInformationByHandle(handle, ctypes.byref(info)):
         raise _win32_error("Cannot inspect an opened skill path")
     return info
+
+
+class _FileIdInfo(ctypes.Structure):
+    _fields_ = [
+        ("volume_serial_number", ctypes.c_uint64),
+        ("file_id", ctypes.c_ubyte * 16),
+    ]
+
+
+def _handle_fingerprint(handle: int) -> tuple[int, bytes, int, int, int]:
+    """Return handle identity and version metadata without crossing CRT/stat APIs.
+
+    FileIdInfo supplies the 128-bit identifier required for ReFS. GetFileInformationByHandle
+    supplies file size and FILETIME metadata from this same held handle.
+    """
+    info = _file_information(handle)
+    file_id = _FileIdInfo()
+    if not _kernel32().GetFileInformationByHandleEx(
+        handle, 0x12, ctypes.byref(file_id), ctypes.sizeof(file_id)
+    ):
+        raise _win32_error("Cannot read the verified file identity")
+    size = (int(info.file_size_high) << 32) | int(info.file_size_low)
+    last_write = (int(info.last_write_time.high) << 32) | int(info.last_write_time.low)
+    creation = (int(info.creation_time.high) << 32) | int(info.creation_time.low)
+    return (
+        int(file_id.volume_serial_number),
+        bytes(file_id.file_id),
+        size,
+        last_write,
+        creation,
+    )
+
+
+def stream_fingerprint(stream: BinaryIO) -> tuple[int, bytes, int, int, int]:
+    """Fingerprint the Win32 file handle owned by a verified stream."""
+    try:
+        msvcrt = importlib.import_module("msvcrt")
+        handle = int(msvcrt.get_osfhandle(stream.fileno()))
+        if handle in {-1, ctypes.c_void_p(-1).value}:
+            raise ValueError("invalid CRT file descriptor")
+        return _handle_fingerprint(handle)
+    except LayerError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise LayerError(Code.INVALID_SOURCE, "Cannot inspect the verified file handle.") from exc
 
 
 def _final_path(handle: int) -> str:

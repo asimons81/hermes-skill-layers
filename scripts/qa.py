@@ -132,7 +132,7 @@ def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, 
     env = dict(os.environ)
     profile.mkdir(parents=True, exist_ok=False)
     os_home.mkdir(parents=True, exist_ok=False)
-    runtime.mkdir(parents=True, exist_ok=True)
+    runtime.mkdir(parents=True, exist_ok=False)
     env["HERMES_HOME"] = str(profile)
     env["HERMES_RUNTIME_DIR"] = str(runtime)
     env["HOME"] = str(os_home)
@@ -148,32 +148,6 @@ def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, 
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["NO_COLOR"] = "1"
     return env
-
-
-def runtime_cache_for(artifacts: Path, pin_name: str) -> Path:
-    """Share Hermes' task-local runtime binaries/cache across isolated profiles and reruns."""
-    key = f"{pin_name}-{platform.system().lower()}-{platform.machine().lower()}"
-    cache = artifacts / ".qa-runtime" / key
-    marker = cache / ".skill-layers-qa-runtime.json"
-    cache_parent = cache.parent
-    cache_parent.mkdir(parents=True, exist_ok=True)
-    if cache.exists():
-        if cache.is_symlink() or not cache.is_dir():
-            raise QAError("Hermes runtime cache is not a regular directory")
-        if not marker.is_file():
-            if any(cache.iterdir()):
-                raise QAError("Existing unmarked runtime cache will not be reused")
-            marker.write_text(json.dumps({"pin": pin_name, "platform": key}), encoding="utf-8")
-    else:
-        cache.mkdir()
-        marker.write_text(json.dumps({"pin": pin_name, "platform": key}), encoding="utf-8")
-    try:
-        identity = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise QAError("Runtime cache marker cannot be read") from exc
-    if identity != {"pin": pin_name, "platform": key}:
-        raise QAError("Runtime cache marker does not match this Hermes pin/platform")
-    return cache
 
 
 def _ps_literal(value: str) -> str:
@@ -192,11 +166,15 @@ def host_command(
     activate = root / "activate.ps1"
     if not powershell or not activate.is_file() or windows_script is None:
         raise QAError("Windows requires PowerShell and the requested Hermes activate.ps1")
-    quoted = " ".join(_ps_literal(arg) for arg in command)
+    executable = "$env:PYTHON" if command[0] == "python" else _ps_literal(command[0])
+    if command[0] == "python":
+        executable = "if ($env:PYTHON) { $env:PYTHON } else { 'python' }"
+    quoted = " ".join(_ps_literal(arg) for arg in command[1:])
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         f". {_ps_literal(str(activate))}\n"
-        f"& {quoted}\n"
+        f"$qaPython = {executable}\n"
+        f"& $qaPython {quoted}\n"
         "exit $LASTEXITCODE\n"
     )
     windows_script.write_text(script, encoding="utf-8")
@@ -230,13 +208,12 @@ def run_profile(
     run_root: Path,
     variant: str,
     plugin_snapshot: Path,
-    runtime_cache: Path,
     plugin_commit: str,
     plugin_hash: str,
 ) -> dict[str, Any]:
     profile = run_root / "profiles" / variant
     os_home = run_root / "os-home" / variant
-    runtime = runtime_cache
+    runtime = run_root / "runtime" / variant
     payload = run_root / "payload" / variant / "skill-layers"
     for parent in (profile.parent, os_home.parent, runtime.parent, payload.parent):
         parent.mkdir(parents=True, exist_ok=True)
@@ -264,10 +241,11 @@ def run_profile(
     env["QA_GUARD_DIR"] = str(guard)
     env["QA_NETWORK_ATTEMPTS"] = str(attempts)
     env["QA_REPORT_PATH"] = str(run_root / f"{variant}-report.json")
+    env["QA_HERMES_ROOT"] = str(hermes_root)
     env["QA_EXPECT_OTHER_PROFILE"] = "a-separate-disposable-profile"
     worker = ROOT / "scripts" / "qa_worker.py"
     cmd = [
-        sys.executable,
+        "python",
         str(worker),
         "--hermes-root",
         str(hermes_root),
@@ -405,7 +383,6 @@ def main(argv: list[str] | None = None) -> int:
         plugin_snapshot = run_root / "plugin-snapshot"
         copy_finite_payload(plugin_snapshot)
         plugin_hash = payload_digest(plugin_snapshot)
-        runtime_cache = runtime_cache_for(artifacts, pin_name)
         snapshot_record = {
             "plugin_commit": plugin_commit,
             "plugin_worktree_dirty": bool(plugin_status),
@@ -431,7 +408,6 @@ def main(argv: list[str] | None = None) -> int:
                 run_root=run_root,
                 variant="profile-a",
                 plugin_snapshot=plugin_snapshot,
-                runtime_cache=runtime_cache,
                 plugin_commit=plugin_commit,
                 plugin_hash=plugin_hash,
             )
@@ -444,7 +420,6 @@ def main(argv: list[str] | None = None) -> int:
                 run_root=run_root,
                 variant="profile-b",
                 plugin_snapshot=plugin_snapshot,
-                runtime_cache=runtime_cache,
                 plugin_commit=plugin_commit,
                 plugin_hash=plugin_hash,
             )

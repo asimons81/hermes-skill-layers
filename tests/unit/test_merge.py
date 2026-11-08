@@ -149,14 +149,11 @@ def test_incompatible_execute_masks_require_explicit_mode_resolution() -> None:
     assert conflict.proposal == TreeFile(b"same\n", True, 0o100)
 
 
-def test_windows_rejects_unrepresentable_execute_masks(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("skill_layers.merge.os.name", "nt")
+def test_merge_retains_execute_metadata_for_later_platform_validation() -> None:
     mode_source = {"SKILL.md": TreeFile(b"same\n", True, 0o100)}
-
-    with pytest.raises(LayerError) as caught:
-        merge_trees({}, mode_source, mode_source)
-
-    assert caught.value.code == Code.UNSUPPORTED_SOURCE.value
+    result = merge_trees({}, mode_source, mode_source)
+    assert result.tree == mode_source
+    assert not result.conflicts
 
 
 def test_git_available_returns_executable_path() -> None:
@@ -173,18 +170,26 @@ def test_missing_git_is_a_dependency_error(monkeypatch: pytest.MonkeyPatch, tmp_
     assert caught.value.code == Code.DEPENDENCY_MISSING.value
 
 
-def _fake_git(path: Path, body: str) -> None:
-    executable = path / "git"
-    executable.write_text(f"#!{sys.executable}\n{body}\n", encoding="utf-8")
-    executable.chmod(0o700)
+def _fake_git(monkeypatch: pytest.MonkeyPatch, path: Path, body: str) -> None:
+    from skill_layers import merge
+
+    program = path / "fake_git.py"
+    program.write_text(body + "\n", encoding="utf-8")
+    actual_runner = merge._run_bounded
+
+    def run_python(argv, **options):
+        return actual_runner([sys.executable, str(program), *argv[1:]], **options)
+
+    monkeypatch.setattr(merge, "git_available", lambda: sys.executable)
+    monkeypatch.setattr(merge, "_run_bounded", run_python)
 
 
 def test_git_process_error_is_not_reported_as_a_merge_conflict(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _fake_git(tmp_path, "import sys; sys.stderr.write('simulated failure\\n'); sys.exit(255)")
-    monkeypatch.setenv("PATH", str(tmp_path))
-
+    _fake_git(
+        monkeypatch, tmp_path, "import sys; sys.stderr.write('simulated failure\\n'); sys.exit(255)"
+    )
     with pytest.raises(LayerError) as caught:
         merge_trees(tree(b"base\n"), tree(b"local\n"), tree(b"source\n"))
 
@@ -195,7 +200,7 @@ def test_git_process_error_is_not_reported_as_a_merge_conflict(
 def test_git_timeout_is_distinct_from_process_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _fake_git(tmp_path, "import time; time.sleep(2)")
+    _fake_git(monkeypatch, tmp_path, "import time; time.sleep(2)")
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr("skill_layers.merge.MERGE_TIMEOUT_SECONDS", 0.05)
 
@@ -209,7 +214,7 @@ def test_git_timeout_is_distinct_from_process_error(
 def test_git_output_overflow_is_bounded_and_partial_output_discarded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _fake_git(tmp_path, "import sys; sys.stdout.buffer.write(b'x' * (1024 * 1024))")
+    _fake_git(monkeypatch, tmp_path, "import sys; sys.stdout.buffer.write(b'x' * (1024 * 1024))")
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr("skill_layers.merge.MERGE_OUTPUT_LIMIT", 128)
 

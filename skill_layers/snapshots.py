@@ -171,7 +171,7 @@ def _open_directory_chain(directory: Path) -> int:
 
 def _capture_tree_windows(directory: Path, *, allow_marker: bool) -> Tree:
     """Path scan on Windows; file bytes come only from handle-verified opens."""
-    from .windows_capture import open_verified
+    from .windows_capture import open_verified, stream_fingerprint
 
     input_root = Path(directory)
     root = input_root
@@ -249,11 +249,14 @@ def _capture_tree_windows(directory: Path, *, allow_marker: bool) -> Tree:
                 )
             try:
                 with open_verified(child, root) as stream:
-                    opened = os.fstat(stream.fileno())
-                    if _stat_fingerprint(opened) != _stat_fingerprint(info):
+                    before_read_path = child.lstat()
+                    if _stat_fingerprint(before_read_path) != _stat_fingerprint(
+                        info
+                    ) or _is_reparse_point(before_read_path):
                         raise LayerError(
                             "STALE_INPUT", f"Skill changed while opening {relative!r}.", True
                         )
+                    opened = stream_fingerprint(stream)
                     chunks: list[bytes] = []
                     total = 0
                     while True:
@@ -267,7 +270,7 @@ def _capture_tree_windows(directory: Path, *, allow_marker: bool) -> Tree:
                                 f"File {relative!r} exceeds {MAX_FILE_BYTES} bytes.",
                             )
                         chunks.append(chunk)
-                    after = os.fstat(stream.fileno())
+                    after_handle = stream_fingerprint(stream)
                 after_path = child.lstat()
             except LayerError:
                 raise
@@ -276,14 +279,14 @@ def _capture_tree_windows(directory: Path, *, allow_marker: bool) -> Tree:
                     "INVALID_SOURCE", f"Cannot safely read skill file {relative!r}."
                 ) from exc
             if (
-                _stat_fingerprint(opened) != _stat_fingerprint(after)
-                or _stat_fingerprint(after) != _stat_fingerprint(after_path)
+                opened != after_handle
+                or _stat_fingerprint(before_read_path) != _stat_fingerprint(after_path)
                 or _is_reparse_point(after_path)
             ):
                 raise LayerError("STALE_INPUT", f"Skill changed while reading {relative!r}.", True)
             execute_bits = info.st_mode & 0o111
             captured[relative] = TreeFile(b"".join(chunks), bool(execute_bits), execute_bits)
-            observed[relative] = _stat_fingerprint(after)
+            observed[relative] = _stat_fingerprint(after_path)
             if sum(len(item.content) for item in captured.values()) > MAX_TREE_BYTES:
                 raise LayerError(
                     "LIMIT_EXCEEDED", f"A skill tree may contain at most {MAX_TREE_BYTES} bytes."

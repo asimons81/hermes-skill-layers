@@ -176,6 +176,28 @@ def _write_file(path: str, expected: str, content: bytes) -> None:
             _kernel32().CloseHandle(handle)
 
 
+def hold_directory_chain(directory: Path) -> list[int]:
+    """Hold existing ancestors without delete sharing until the caller closes the handles."""
+    target = _canonical_absolute(directory)
+    drive, tail = ntpath.splitdrive(target)
+    anchor = drive + "\\"
+    handles: list[int] = []
+    try:
+        handle = _held_directory(anchor, None)
+        handles.append(handle)
+        path, final = anchor, _final_path(handle)
+        for part in (item for item in tail.split("\\") if item):
+            path = ntpath.join(path, part)
+            handle = _held_directory(path, _expected_child(final, (part,)))
+            handles.append(handle)
+            final = _final_path(handle)
+        return handles
+    except BaseException:
+        for handle in reversed(handles):
+            _kernel32().CloseHandle(handle)
+        raise
+
+
 def stage_new(directory: Path, tree: Tree, marker: bytes | None = None) -> None:
     """Write *tree* into a securely held, new or empty Windows staging directory.
 
