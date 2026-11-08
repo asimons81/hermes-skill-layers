@@ -13,7 +13,7 @@ The stable tag is annotated; the commit above is its resolved source commit, not
 
 ## Recorded development checks
 
-- Local source through content-store flush hardening and fresh namespaced-loader regression: **167 passed, 12 platform-specific skips**, one upstream FastAPI/httpx test-client deprecation warning. Ruff check/format and mypy passed. The skips are not passes for those platform paths.
+- Local source through content-store flush hardening and fresh namespaced-loader and concurrent-idempotency regressions: **171 passed, 12 platform-specific skips**, one upstream FastAPI/httpx test-client deprecation warning. Ruff check/format and mypy passed. The skips are not passes for those platform paths.
 - Browser harness: **14 passed**, including escaped untrusted text, explicit conflict resolution with captured sides/proposal, review-hash publication, stale/error states, profile-switch response rejection, recovery controls, and narrow/desktop layouts. This harness uses SDK fixtures and cannot establish real host compatibility.
 - Sanitized CI source `ac0b2c3b21250e14031bdc83a64da15de4e9d31e`: all six jobs passed in [run 42444854073](https://github.com/asimons81/hermes-skill-layers/actions/runs/42444854073): Ubuntu Python 3.11 and 3.14, macOS Python 3.13, native Windows Python 3.13, static checks, and Chromium UI tests. Later candidate changes require their own workflow run; inspect Actions on the actual catalog-pinned source commit.
 - A real Hermes Desktop smoke test selected the synthetic release-notes source, prepared a full derivative review, published it, and displayed the exact native selector. The release gate additionally requires the complete refresh/conflict/rollback journey from a clean candidate.
@@ -38,7 +38,7 @@ Injected `ENOSPC`, `EACCES`, and `EXDEV` errors test error/recovery decisions. T
 
 ## Reproduce the checks
 
-Use a clean plugin checkout, supported Python, local Git, and isolated pinned Hermes contributor environments. Do not link a development project containing private `work/` into a Hermes profile. The QA runner copies only an allowlisted finite payload and creates disposable real named profiles under its artifacts directory.
+Use a clean plugin checkout, supported Python, local Git, and isolated pinned Hermes contributor environments. Do not link a development project containing private `work/` into a Hermes profile. The QA runner copies only an allowlisted finite payload and creates disposable real named profiles under its artifacts directory. It reuses only a host-commit/platform-specific tool and download cache under `<artifacts>/.qa-runtime/`; profile homes, identities, configuration and plugin history remain new for each run. The report records the configured and canonical cache paths. An explicitly preseeded cache symlink must resolve to `work/host-runtime` or `work/release-runtime` within the plugin checkout (these may themselves point to an already verified task-owned PM store). This reuses the public `HERMES_RUNTIME_DIR` mechanism without copying or moving PM-managed state. Never point these test paths at a production store.
 
 ```sh
 python -m pip install -e ".[dev]"

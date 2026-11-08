@@ -49,10 +49,13 @@ def test_environment_roots_are_child_only_and_not_project_links(tmp_path, monkey
     monkeypatch.setattr(qa, "os", __import__("os"))
     profile = tmp_path / "profile"
     profile.mkdir()
-    env = qa.clean_environment(profile, tmp_path / "home", tmp_path / "runtime")
+    env = qa.clean_environment(
+        profile, tmp_path / "home", tmp_path / "runtime", tmp_path / "uv-cache"
+    )
     assert env["HERMES_HOME"] == str(profile)
     assert env["HOME"] == str(tmp_path / "home")
     assert "PYTHONPATH" not in env
+    assert env["UV_CACHE_DIR"] == str(tmp_path / "uv-cache")
     assert dict(__import__("os").environ) == before
     assert not profile.is_symlink()
 
@@ -70,15 +73,54 @@ def test_profile_setup_uses_public_command_and_shared_install_root(tmp_path, mon
 
     monkeypatch.setattr(qa.subprocess, "run", fake_run)
     monkeypatch.setattr(qa, "host_command", lambda _root, command, **_kwargs: command)
+    runtime = tmp_path / "run" / "task-runtime"
+    uv_cache = tmp_path / "run" / "uv-cache"
     home, os_home, runtime = qa.create_named_profiles(
-        hermes_root=tmp_path / "host", run_root=tmp_path / "run", names=("profile-a", "profile-b")
+        hermes_root=tmp_path / "host",
+        run_root=tmp_path / "run",
+        runtime=runtime,
+        uv_cache=uv_cache,
+        names=("profile-a", "profile-b"),
     )
     assert (home / "profiles" / "profile-a" / ".env").is_file()
     assert (home / "profiles" / "profile-b" / ".env").is_file()
     assert os_home.is_dir() and runtime.is_dir()
+    assert uv_cache.is_dir()
     assert len(commands) == 2
     assert all(command[0:3] == ["python", "-m", "hermes_cli.main"] for command, *_ in commands)
     assert len({runtime_path for _, _, _, runtime_path in commands}) == 1
+
+
+def test_runtime_cache_is_host_pinned_task_owned_and_reusable(tmp_path, monkeypatch):
+    project = tmp_path / "workspace" / "work" / "release-candidate"
+    artifacts = project / "work" / "artifacts"
+    artifacts.mkdir(parents=True)
+    monkeypatch.setattr(qa, "ROOT", project)
+    cache, uv_cache, record = qa.prepare_runtime_cache(
+        artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460"
+    )
+    assert cache.is_dir() and uv_cache.is_dir()
+    assert cache.parent == artifacts / ".qa-runtime"
+    assert record["seed_topology"] == "created-empty"
+    assert record["canonical_path"] == str(cache.resolve())
+
+    prepared = project / "work" / "host-runtime"
+    prepared.mkdir(parents=True)
+    cache.rmdir()
+    cache.symlink_to(prepared, target_is_directory=True)
+    reused, _, record = qa.prepare_runtime_cache(
+        artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460"
+    )
+    assert reused.resolve() == prepared.resolve()
+    assert record["seed_topology"] == "symlink"
+
+    cache.unlink()
+    unsafe = tmp_path / "workspace" / "work" / "host-runtime"
+    unsafe.parent.mkdir(parents=True, exist_ok=True)
+    unsafe.mkdir()
+    cache.symlink_to(unsafe, target_is_directory=True)
+    with pytest.raises(qa.QAError, match="must target this task's"):
+        qa.prepare_runtime_cache(artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460")
 
 
 def test_pin_verification_requires_the_exact_host_module_layout(tmp_path, monkeypatch):

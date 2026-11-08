@@ -448,20 +448,20 @@ class Store:
         target = self._object_path(digest)
         try:
             self.objects.mkdir(mode=0o700)
-            self._fsync_dir(self.root)
         except FileExistsError:
             pass
         objects_info = self.objects.lstat()
         if stat.S_ISLNK(objects_info.st_mode) or not stat.S_ISDIR(objects_info.st_mode):
             raise LayerError("PATH_UNSAFE", "Content object root must be a real directory.")
+        self._fsync_dir(self.root)
         try:
             target.parent.mkdir(mode=0o700)
-            self._fsync_dir(self.objects)
         except FileExistsError:
             pass
         parent_info = target.parent.lstat()
         if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
             raise LayerError("PATH_UNSAFE", "Content object directory must be a real directory.")
+        self._fsync_dir(self.objects)
         if target.exists():
             self._verify_object(target, digest)
             self._fsync_dir(target.parent)

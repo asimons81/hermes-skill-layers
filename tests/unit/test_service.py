@@ -508,3 +508,63 @@ def test_storage_failure_before_stage_commit_can_retry(workspace, monkeypatch, p
     for stage in preserved:
         assert (stage / "partial.txt").read_bytes() == b"Preserve me"
     assert (source / "SKILL.md").read_bytes() == V1
+
+
+def test_simultaneous_same_publish_request_has_one_result(workspace):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    service, source, scope = workspace
+    first, original = derive(service)
+    candidate = act(service, "refresh", layer_id=first["layer_id"])
+    review = service.read("diff", candidate["candidate_id"])["data"]
+    parameters = {
+        "candidate_id": candidate["candidate_id"],
+        "revision": review["revision"],
+        "review_hash": review["review_hash"],
+    }
+    request_id = "67e03615-625b-4e0b-af4b-3b55c538f27b"
+    journaled, finish = Event(), Event()
+
+    def hold():
+        journaled.set()
+        assert finish.wait(10), "Concurrent request did not release publication"
+
+    def publish_first():
+        worker = Service(
+            scope,
+            discovery=SyntheticDiscovery(scope, source),
+            scope_provider=lambda: scope,
+            hooks={"before_stage": hold},
+        )
+        try:
+            return worker.mutate(
+                "publish", parameters, expected_profile=scope.id, request_id=request_id
+            )
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(publish_first)
+        try:
+            assert journaled.wait(10), "First publication did not reach its journal"
+            duplicate = service.mutate(
+                "publish", parameters, expected_profile=scope.id, request_id=request_id
+            )
+            assert duplicate["error"]["code"] == "RECOVERY_REQUIRED"
+            operations = [
+                op for op in service.store.list("operations") if op["request_id"] == request_id
+            ]
+            assert len(operations) == 1
+            assert duplicate["error"]["details"]["operation_id"] == operations[0]["id"]
+        finally:
+            finish.set()
+        completed = pending.result(timeout=10)
+    assert completed["ok"], completed
+    repeated = service.mutate(
+        "publish", parameters, expected_profile=scope.id, request_id=request_id
+    )
+    assert repeated == completed
+    assert len(service.store.list("exports")) == 2
+    assert Path(original["directory"]).is_dir()
+    assert (source / "SKILL.md").read_bytes() == V1

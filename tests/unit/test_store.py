@@ -256,3 +256,32 @@ def test_directory_fsync_failure_is_not_silently_successful(tmp_path, monkeypatc
         store._fsync_dir(store.root)
     assert error.value.errno == errno.ENOSPC
     store.close()
+
+
+@pytest.mark.parametrize("parent", ["root", "objects"])
+def test_object_retry_repeats_failed_directory_creation_barrier(tmp_path, monkeypatch, parent):
+    import errno
+
+    _, store = _initialized_store(tmp_path, monkeypatch)
+    target_parent = getattr(store, parent)
+    real_sync = store._fsync_dir
+    calls = []
+    failed = False
+
+    def sync(path):
+        nonlocal failed
+        calls.append(path)
+        if path == target_parent and not failed:
+            failed = True
+            raise OSError(errno.ENOSPC, "Simulated parent directory flush failure")
+        real_sync(path)
+
+    monkeypatch.setattr(store, "_fsync_dir", sync)
+    content = b"Retry the parent durability barrier"
+    digest = hashlib.sha256(content).hexdigest()
+    with pytest.raises(OSError):
+        store._write_object(content, digest)
+    store._write_object(content, digest)
+    assert calls.count(target_parent) == 2
+    assert store._verify_object(store._object_path(digest), digest) == content
+    store.close()

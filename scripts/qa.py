@@ -127,7 +127,9 @@ def copy_finite_payload(destination: Path) -> None:
             raise QAError("Finite payload unexpectedly contains project state")
 
 
-def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, str]:
+def clean_environment(
+    profile: Path, os_home: Path, runtime: Path, uv_cache: Path
+) -> dict[str, str]:
     """Return a child-only env mapping; never mutate this process environment."""
     env = dict(os.environ)
     if not profile.is_dir():
@@ -142,6 +144,7 @@ def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, 
     env["LOCALAPPDATA"] = str(os_home / "AppData" / "Local")
     env["XDG_CONFIG_HOME"] = str(os_home / ".config")
     env["XDG_CACHE_HOME"] = str(os_home / ".cache")
+    env["UV_CACHE_DIR"] = str(uv_cache)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
     env.pop("VIRTUAL_ENV", None)
@@ -152,19 +155,21 @@ def clean_environment(profile: Path, os_home: Path, runtime: Path) -> dict[str, 
 
 
 def create_named_profiles(
-    *, hermes_root: Path, run_root: Path, names: tuple[str, ...]
+    *, hermes_root: Path, run_root: Path, runtime: Path, uv_cache: Path, names: tuple[str, ...]
 ) -> tuple[Path, Path, Path]:
     """Create real named profiles under one isolated Hermes root using its public CLI."""
     hermes_home = run_root / "hermes-home"
     os_home = run_root / "os-home"
-    runtime = run_root / "runtime"
-    for directory in (hermes_home, os_home, runtime):
+    for directory in (hermes_home, os_home):
         directory.mkdir(parents=True, exist_ok=False)
+    runtime.mkdir(parents=True, exist_ok=True)
+    uv_cache.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update(
         {
             "HERMES_HOME": str(hermes_home),
             "HERMES_RUNTIME_DIR": str(runtime),
+            "UV_CACHE_DIR": str(uv_cache),
             "HOME": str(os_home),
             "USERPROFILE": str(os_home),
             "APPDATA": str(os_home / "AppData" / "Roaming"),
@@ -214,6 +219,43 @@ def create_named_profiles(
         ):
             raise QAError(f"Hermes profile create omitted the expected live identity for {name}")
     return hermes_home, os_home, runtime
+
+
+def prepare_runtime_cache(artifacts: Path, commit: str) -> tuple[Path, Path, dict[str, str]]:
+    """Use a task-owned host-pinned tool store; every run still creates fresh profiles."""
+    identity = f"{commit}-{sys.platform}-{platform.machine().lower()}"
+    cache = artifacts / ".qa-runtime" / identity
+    existed = cache.exists() or cache.is_symlink()
+    if cache.is_symlink():
+        resolved = cache.resolve(strict=True)
+        approved_targets = {
+            (ROOT / "work" / "host-runtime").resolve(strict=False),
+            (ROOT / "work" / "release-runtime").resolve(strict=False),
+        }
+        if resolved not in approved_targets:
+            raise QAError(
+                "A preseeded QA runtime symlink must target this task's host-runtime "
+                "or release-runtime"
+            )
+        if not resolved.is_dir():
+            raise QAError("Preseeded QA runtime target is not a directory")
+        seed = "symlink"
+    else:
+        cache.mkdir(parents=True, exist_ok=True)
+        if not cache.is_dir():
+            raise QAError("QA runtime cache path is not a directory")
+        resolved = cache.resolve(strict=True)
+        seed = "reused-cache" if existed else "created-empty"
+    uv_cache = artifacts / ".qa-runtime" / f"{identity}-uv-cache"
+    uv_cache.mkdir(parents=True, exist_ok=True)
+    record = {
+        "configured_path": str(cache.absolute()),
+        "canonical_path": str(resolved),
+        "uv_cache_path": str(uv_cache.resolve(strict=True)),
+        "seed_topology": seed,
+        "sharing": "tool binaries and download cache only; profile state is newly created per run",
+    }
+    return cache, uv_cache, record
 
 
 def _ps_literal(value: str) -> str:
@@ -276,11 +318,12 @@ def run_profile(
     plugin_snapshot: Path,
     plugin_commit: str,
     plugin_hash: str,
+    runtime: Path,
+    uv_cache: Path,
 ) -> dict[str, Any]:
     profile = run_root / "hermes-home" / "profiles" / variant
     os_home = run_root / "os-home"
-    runtime = run_root / "runtime"
-    env = clean_environment(profile, os_home, runtime)
+    env = clean_environment(profile, os_home, runtime, uv_cache)
     # Reuse one finite disposable payload tree; never link the development project root.
     target = profile / "plugins" / "skill-layers"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -330,7 +373,7 @@ def run_profile(
     )
     if dict(os.environ) != env_before:
         raise QAError("Runner altered its parent process environment")
-    roots = [profile, os_home, runtime, run_root]
+    roots = [profile, os_home, runtime, uv_cache, run_root]
     stdout = _redact(result.stdout, roots)
     stderr = _redact(result.stderr, roots)
     log = run_root / f"{variant}.log"
@@ -436,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
             raise QAError(
                 "A nested Hermes checkout is permitted only under this project's work/ directory"
             )
+        runtime_cache, uv_cache, runtime_record = prepare_runtime_cache(artifacts, commit)
         plugin_commit = _git(ROOT, "rev-parse", "HEAD")
         plugin_status = _git(ROOT, "status", "--porcelain=v1")
         plugin_status_hash = hashlib.sha256(plugin_status.encode("utf-8")).hexdigest()
@@ -450,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
             "plugin_worktree_dirty": bool(plugin_status),
             "plugin_status_sha256": plugin_status_hash,
             "plugin_payload_sha256": plugin_hash,
+            "runtime_cache": runtime_record,
             "files": sorted(
                 path.relative_to(plugin_snapshot).as_posix()
                 for path in plugin_snapshot.rglob("*")
@@ -464,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
         create_named_profiles(
             hermes_root=hermes_root,
             run_root=run_root,
+            runtime=runtime_cache,
+            uv_cache=uv_cache,
             names=("profile-a", "profile-b"),
         )
         reports = []
@@ -477,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
                 plugin_snapshot=plugin_snapshot,
                 plugin_commit=plugin_commit,
                 plugin_hash=plugin_hash,
+                runtime=runtime_cache,
+                uv_cache=uv_cache,
             )
         )
         reports.append(
@@ -489,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
                 plugin_snapshot=plugin_snapshot,
                 plugin_commit=plugin_commit,
                 plugin_hash=plugin_hash,
+                runtime=runtime_cache,
+                uv_cache=uv_cache,
             )
         )
         profile_ids = {report.get("profile_id") for report in reports}
@@ -509,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:
             "plugin_worktree_dirty": bool(plugin_status),
             "plugin_status_sha256": plugin_status_hash,
             "plugin_payload_sha256": plugin_hash,
+            "runtime_cache": runtime_record,
             "profiles": reports,
             "desktop_evidence": str(artifacts / "golden" / "desktop-evidence.json")
             if args.suite == "golden"
