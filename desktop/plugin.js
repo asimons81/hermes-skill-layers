@@ -46,6 +46,7 @@ const messageOf = error => error?.error?.message || error?.message || 'The reque
 const changeLabel = (value, error) => error ? 'unavailable' : value === null || value === undefined ? 'not available' : value ? 'yes' : 'no'
 const sourceLabel = source => source?.observed_name || source?.selector || source?.display_name || source?.name || ''
 const modeChange = file => {
+  if (file?.conflict || file?.resolution_required) return ''
   const oldBits = file?.old_execute_bits
   const newBits = file?.new_execute_bits
   if (oldBits !== null && oldBits !== undefined || newBits !== null && newBits !== undefined) {
@@ -57,9 +58,11 @@ const modeChange = file => {
   }
   return ''
 }
-const fileKind = file => file?.old_sha256 == null && file?.new_sha256 != null
-  ? 'Added file'
-  : file?.old_sha256 != null && file?.new_sha256 == null ? 'Deleted file' : ''
+const fileKind = file => {
+  if (!file || file.conflict || file.resolution_required) return ''
+  if (file.old_sha256 == null && file.new_sha256 != null) return 'Added file'
+  return file.old_sha256 != null && file.new_sha256 == null ? 'Deleted file' : ''
+}
 
 function LayerPage({ pluginContext }) {
   const connectionId = useValue(host.state.connectionId)

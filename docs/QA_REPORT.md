@@ -13,7 +13,7 @@ The stable tag is annotated; the commit above is its resolved source commit, not
 
 ## Recorded development checks
 
-- Local source through content-store flush hardening and fresh namespaced-loader and concurrent-idempotency regressions: **171 passed, 12 platform-specific skips**, one upstream FastAPI/httpx test-client deprecation warning. Ruff check/format and mypy passed. The skips are not passes for those platform paths.
+- Local source through content-store flush hardening and fresh namespaced-loader and concurrent-idempotency regressions: **173 passed, 12 platform-specific skips**, one upstream FastAPI/httpx test-client deprecation warning. Ruff check/format and mypy passed. The skips are not passes for those platform paths.
 - Browser harness: **14 passed**, including escaped untrusted text, explicit conflict resolution with captured sides/proposal, review-hash publication, stale/error states, profile-switch response rejection, recovery controls, and narrow/desktop layouts. This harness uses SDK fixtures and cannot establish real host compatibility.
 - Sanitized CI source `ac0b2c3b21250e14031bdc83a64da15de4e9d31e`: all six jobs passed in [run 42444854073](https://github.com/asimons81/hermes-skill-layers/actions/runs/42444854073): Ubuntu Python 3.11 and 3.14, macOS Python 3.13, native Windows Python 3.13, static checks, and Chromium UI tests. Later candidate changes require their own workflow run; inspect Actions on the actual catalog-pinned source commit.
 - A real Hermes Desktop smoke test selected the synthetic release-notes source, prepared a full derivative review, published it, and displayed the exact native selector. The release gate additionally requires the complete refresh/conflict/rollback journey from a clean candidate.

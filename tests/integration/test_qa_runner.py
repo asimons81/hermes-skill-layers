@@ -17,6 +17,13 @@ qa = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(qa)
 
 
+def _directory_symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Directory symlinks are unavailable on this host: {exc}")
+
+
 def test_finite_payload_excludes_project_state_and_python_caches(tmp_path, monkeypatch):
     source = tmp_path / "project"
     source.mkdir()
@@ -107,7 +114,7 @@ def test_runtime_cache_is_host_pinned_task_owned_and_reusable(tmp_path, monkeypa
     prepared = project / "work" / "host-runtime"
     prepared.mkdir(parents=True)
     cache.rmdir()
-    cache.symlink_to(prepared, target_is_directory=True)
+    _directory_symlink_or_skip(cache, prepared)
     reused, _, record = qa.prepare_runtime_cache(
         artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460"
     )
@@ -118,8 +125,36 @@ def test_runtime_cache_is_host_pinned_task_owned_and_reusable(tmp_path, monkeypa
     unsafe = tmp_path / "workspace" / "work" / "host-runtime"
     unsafe.parent.mkdir(parents=True, exist_ok=True)
     unsafe.mkdir()
-    cache.symlink_to(unsafe, target_is_directory=True)
+    _directory_symlink_or_skip(cache, unsafe)
     with pytest.raises(qa.QAError, match="must target this task's"):
+        qa.prepare_runtime_cache(artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460")
+
+
+def test_runtime_cache_parent_symlink_cannot_redirect_outside_artifacts(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _directory_symlink_or_skip(artifacts / ".qa-runtime", outside)
+
+    with pytest.raises(qa.QAError, match="runtime cache parent must be a real"):
+        qa.prepare_runtime_cache(artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460")
+
+
+def test_uv_cache_symlink_cannot_redirect_outside_cache_parent(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    artifacts = project / "work" / "artifacts"
+    artifacts.mkdir(parents=True)
+    monkeypatch.setattr(qa, "ROOT", project)
+    _runtime, uv_cache, _record = qa.prepare_runtime_cache(
+        artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460"
+    )
+    uv_cache.rmdir()
+    outside = tmp_path / "outside-uv-cache"
+    outside.mkdir()
+    _directory_symlink_or_skip(uv_cache, outside)
+
+    with pytest.raises(qa.QAError, match="UV cache must be a real"):
         qa.prepare_runtime_cache(artifacts, "c8d4e43efd296f632116cf3f17738aa2c4838460")
 
 

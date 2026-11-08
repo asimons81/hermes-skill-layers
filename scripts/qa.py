@@ -15,6 +15,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -223,10 +224,20 @@ def create_named_profiles(
 
 def prepare_runtime_cache(artifacts: Path, commit: str) -> tuple[Path, Path, dict[str, str]]:
     """Use a task-owned host-pinned tool store; every run still creates fresh profiles."""
+    artifacts = artifacts.resolve(strict=True)
     identity = f"{commit}-{sys.platform}-{platform.machine().lower()}"
-    cache = artifacts / ".qa-runtime" / identity
-    existed = cache.exists() or cache.is_symlink()
-    if cache.is_symlink():
+    cache_base = artifacts / ".qa-runtime"
+    if _lstat_or_none(cache_base) is None:
+        cache_base.mkdir(exist_ok=False)
+    _require_real_directory(cache_base, "QA runtime cache parent")
+    cache_base_real = cache_base.resolve(strict=True)
+    if cache_base_real.parent != artifacts:
+        raise QAError("QA runtime cache parent must be a real directory under the artifacts root")
+
+    cache = cache_base / identity
+    cache_stat = _lstat_or_none(cache)
+    existed = cache_stat is not None
+    if cache_stat is not None and _is_reparse(cache_stat):
         resolved = cache.resolve(strict=True)
         approved_targets = {
             (ROOT / "work" / "host-runtime").resolve(strict=False),
@@ -237,25 +248,50 @@ def prepare_runtime_cache(artifacts: Path, commit: str) -> tuple[Path, Path, dic
                 "A preseeded QA runtime symlink must target this task's host-runtime "
                 "or release-runtime"
             )
-        if not resolved.is_dir():
-            raise QAError("Preseeded QA runtime target is not a directory")
+        _require_real_directory(resolved, "Preseeded QA runtime target")
         seed = "symlink"
     else:
-        cache.mkdir(parents=True, exist_ok=True)
-        if not cache.is_dir():
-            raise QAError("QA runtime cache path is not a directory")
+        if cache_stat is None:
+            cache.mkdir(exist_ok=False)
+        _require_real_directory(cache, "QA runtime cache")
         resolved = cache.resolve(strict=True)
+        if resolved.parent != cache_base_real:
+            raise QAError("QA runtime cache must be a canonical child of its real cache parent")
         seed = "reused-cache" if existed else "created-empty"
-    uv_cache = artifacts / ".qa-runtime" / f"{identity}-uv-cache"
-    uv_cache.mkdir(parents=True, exist_ok=True)
+    uv_cache = cache_base / f"{identity}-uv-cache"
+    if _lstat_or_none(uv_cache) is None:
+        uv_cache.mkdir(exist_ok=False)
+    _require_real_directory(uv_cache, "UV cache")
+    uv_cache_real = uv_cache.resolve(strict=True)
+    if uv_cache_real.parent != cache_base_real:
+        raise QAError("UV cache must be a canonical child of the real QA runtime cache parent")
     record = {
         "configured_path": str(cache.absolute()),
         "canonical_path": str(resolved),
-        "uv_cache_path": str(uv_cache.resolve(strict=True)),
+        "uv_cache_path": str(uv_cache_real),
         "seed_topology": seed,
         "sharing": "tool binaries and download cache only; profile state is newly created per run",
     }
     return cache, uv_cache, record
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    # FILE_ATTRIBUTE_REPARSE_POINT (0x400) also detects Windows junctions,
+    # without depending on Path.is_junction() being available.
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _require_real_directory(path: Path, description: str) -> None:
+    info = _lstat_or_none(path)
+    if info is None or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise QAError(f"{description} must be a real, non-reparse directory")
 
 
 def _ps_literal(value: str) -> str:
@@ -466,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         if not artifacts.is_absolute():
             raise QAError("--artifacts must be absolute")
         artifacts.mkdir(parents=True, exist_ok=True)
+        artifacts = artifacts.resolve(strict=True)
         if _is_within(artifacts, hermes_root) or _is_within(hermes_root, artifacts):
             raise QAError("Artifacts must be outside the Hermes checkout")
         if _is_within(ROOT, artifacts):
