@@ -126,6 +126,7 @@ test('review exposes execute-bit masks, binary hashes, and add/delete kinds', as
   const candidate = ready()
   candidate.files = [
     { path: 'SKILL.md', old_executable: true, new_executable: true, old_execute_bits: 1, new_execute_bits: 7, diff: 'mode change', old_sha256: 'same-a', new_sha256: 'same-b' },
+    { path: 'unchanged-mode.txt', old_sha256: 'old-text', new_sha256: 'new-text', old_execute_bits: 0, new_execute_bits: 0, diff: '+changed text' },
     { path: 'media.bin', binary: true, old_sha256: 'binary-old', new_sha256: 'binary-new' },
     { path: 'added.txt', old_sha256: null, new_sha256: 'added-hash', diff: '+new' },
     { path: 'removed.txt', old_sha256: 'removed-hash', new_sha256: null, diff: '-old' }
@@ -134,6 +135,9 @@ test('review exposes execute-bit masks, binary hashes, and add/delete kinds', as
   await page.getByRole('button', { name: 'History and status' }).click()
   await page.getByRole('button', { name: 'Review candidate' }).click()
   await expect(page.getByText('Execute bits: 01 → 07')).toBeVisible()
+  await expect(page.getByRole('navigation', { name: 'Changed files' }).getByRole('button', { name: 'unchanged-mode.txt', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'unchanged-mode.txt', exact: true }).click()
+  await expect(page.getByText('Execute bits: 00 → 00', { exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: /media.bin/ }).click()
   await expect(page.getByText('Old SHA-256: binary-old')).toBeVisible()
   await expect(page.getByText('New SHA-256: binary-new')).toBeVisible()

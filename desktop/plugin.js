@@ -49,6 +49,7 @@ const modeChange = file => {
   if (file?.conflict || file?.resolution_required) return ''
   const oldBits = file?.old_execute_bits
   const newBits = file?.new_execute_bits
+  if (oldBits != null && newBits != null && oldBits === newBits) return ''
   if (oldBits !== null && oldBits !== undefined || newBits !== null && newBits !== undefined) {
     const octal = value => value === null || value === undefined ? '—' : `0${Number(value).toString(8)}`
     return `Execute bits: ${octal(oldBits)} → ${octal(newBits)}`
