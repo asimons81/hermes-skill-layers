@@ -59,6 +59,21 @@ def check(condition: bool, message: str) -> None:
 WORKFLOW_GUARD: Path | None = None
 
 
+def trace_command(argv: list[str], result: subprocess.CompletedProcess[str]) -> None:
+    """Persist disposable QA command output so a failing phase is reproducible."""
+    trace_path = os.environ.get("QA_COMMAND_TRACE")
+    if not trace_path:
+        return
+    record = {
+        "argv": argv,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    with Path(trace_path).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def call_hermes(
     root: Path, args: list[str], *, guard: Path | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -67,8 +82,9 @@ def call_hermes(
     guard = guard or WORKFLOW_GUARD
     if guard is not None:
         env["PYTHONPATH"] = str(guard)
+    argv = [sys.executable, str(root / "hermes"), *args]
     result = subprocess.run(
-        [sys.executable, str(root / "hermes"), *args],
+        argv,
         cwd=root,
         env=env,
         input=input_text,
@@ -77,6 +93,7 @@ def call_hermes(
         timeout=180,
         check=False,
     )
+    trace_command(argv, result)
     if result.returncode:
         raise RuntimeError(
             f"Hermes command failed ({args[0]}): exit={result.returncode}; "
@@ -114,10 +131,14 @@ def fresh_host_verification(root: Path) -> dict[str, Any]:
         socket.socket.connect_ex = denied
         socket.create_connection = denied
         import hermes_cli.main as host_main
-        from skill_layers.plugin import _read_tool
+        from hermes_cli.plugins import discover_plugins
+        from tools.registry import registry
         from fastapi.testclient import TestClient
         from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
-        read_result = json.loads(_read_tool('list', {}))
+        discover_plugins()
+        registered_tool = registry.get_entry('skill_layers_list')
+        tool_result = registry.dispatch('skill_layers_list', {})
+        read_result = json.loads(tool_result) if isinstance(tool_result, str) else tool_result
         with TestClient(app) as client:
             path = '/api/plugins/skill-layers/layers'
             accepted = client.get(path, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
@@ -131,17 +152,11 @@ def fresh_host_verification(root: Path) -> dict[str, Any]:
                 },
                 headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
             )
-        spec = __import__('importlib.util').util.find_spec('skill_layers')
         expected_host = os.path.join(os.environ['QA_HERMES_ROOT'], 'hermes_cli', 'main.py')
         host_matches = os.path.realpath(host_main.__file__) == expected_host
-        package_origin = spec.origin.replace('\\\\', '/') if spec else ''
-        package_is_shared = bool(
-            spec and '/plugins/skill-layers/skill_layers/' not in package_origin
-        )
         loaded = {
             'host_module_matches_checkout': host_matches,
-            'shared_package_loaded': spec is not None,
-            'shared_package_outside_plugin_install': package_is_shared,
+            'registered_tool_found': registered_tool is not None,
             'tool_ok': read_result.get('ok') is True,
             'tool_bounded': len(json.dumps(read_result).encode('utf-8')) <= 32768,
             'profile_id': read_result.get('profile_id'),
@@ -201,7 +216,7 @@ def fresh_host_verification(root: Path) -> dict[str, Any]:
             candidate = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict) and "shared_package_loaded" in candidate:
+        if isinstance(candidate, dict) and "registered_tool_found" in candidate:
             report = candidate
             break
     if report is None:
@@ -209,10 +224,8 @@ def fresh_host_verification(root: Path) -> dict[str, Any]:
             "Fresh PM generation probe omitted JSON evidence; "
             f"stdout-tail={result.stdout[-1200:]!r}; stderr-tail={result.stderr[-1200:]!r}"
         )
-    if not report.get("host_module_matches_checkout") or not report.get("shared_package_loaded"):
-        raise RuntimeError("Fresh PM Python cannot import the admitted shared package")
-    if not report.get("shared_package_outside_plugin_install"):
-        raise RuntimeError("Shared package import resolved inside plugin installation directory")
+    if not report.get("host_module_matches_checkout") or not report.get("registered_tool_found"):
+        raise RuntimeError("Fresh PM Python did not load the plugin or register its read-only tool")
     if not report.get("tool_ok") or not report.get("tool_bounded"):
         raise RuntimeError("Read-only registered tool failed or exceeded its output bound")
     if not report.get("authenticated_ok") or report.get("unauthenticated_status") != 401:
@@ -239,6 +252,10 @@ def run() -> dict[str, Any]:
     plugin_dir = plugin_argument.resolve(strict=True)
     home = Path(os.environ["HERMES_HOME"]).resolve(strict=True)
     check(
+        plugin_argument.is_dir() and not plugin_argument.is_symlink(),
+        "Plugin payload must be a physical disposable-profile directory",
+    )
+    check(
         plugin_argument == home / "plugins" / "skill-layers",
         "Plugin payload is outside the disposable profile",
     )
@@ -264,6 +281,28 @@ def run() -> dict[str, Any]:
     )
     version = call_hermes(root, ["--version"]).stdout.strip()
 
+    from ruamel.yaml import YAML
+
+    profile_config_path = home / "config.yaml"
+    profile_config = (
+        YAML(typ="safe").load(profile_config_path.read_text(encoding="utf-8")) or {}
+        if profile_config_path.is_file()
+        else {}
+    )
+    enabled_before = profile_config.get("plugins", {}).get("enabled", [])
+    check(
+        enabled_before == [],
+        "Disposable profile must start with plugins.enabled empty",
+    )
+    initial_inventory = json.loads(call_hermes(root, ["plugins", "list", "--json"]).stdout)
+    initially_installed = next(
+        (item for item in initial_inventory if item.get("name") == "skill-layers"), None
+    )
+    check(
+        initially_installed is not None and initially_installed.get("status") == "not enabled",
+        "Installed plugin must be visibly disabled before the admission command",
+    )
+
     # Hermes' documented catalog admission gate builds plugin metadata and admits declared deps.
     validation = call_hermes(
         root, ["plugins", "validate", str(plugin_dir), "--install-deps", "--json"], input_text="y\n"
@@ -271,7 +310,19 @@ def run() -> dict[str, Any]:
     validation_data = json.loads(validation.stdout)
     check(validation_data.get("ok") is True, "Hermes plugin validation failed")
     # This is an explicit operator-selected command in a disposable profile; no --yolo is used.
-    call_hermes(root, ["plugins", "enable", "skill-layers"], input_text="y\n")
+    enabled_output = call_hermes(root, ["plugins", "enable", "skill-layers"], input_text="y\n")
+    check(
+        "Plugin skill-layers enabled." in enabled_output.stdout,
+        "Hermes did not perform plugin admission from the initially disabled state",
+    )
+    plugin_inventory = json.loads(call_hermes(root, ["plugins", "list", "--json"]).stdout)
+    enabled_entry = next(
+        (item for item in plugin_inventory if item.get("name") == "skill-layers"), None
+    )
+    check(
+        enabled_entry is not None and enabled_entry.get("status") == "enabled",
+        "Hermes plugin inventory does not show the admitted plugin enabled",
+    )
     global WORKFLOW_GUARD
     WORKFLOW_GUARD = Path(os.environ["QA_GUARD_DIR"])
     attempts = Path(os.environ["QA_NETWORK_ATTEMPTS"])
@@ -296,6 +347,7 @@ def run() -> dict[str, Any]:
         "hermes_version": version,
         "plugin_commit": args.plugin_commit,
         "plugin_payload_sha256": args.plugin_hash,
+        "plugin_payload_topology": "physical-directory",
         "variant": args.variant,
         "checks": [],
     }
@@ -304,6 +356,13 @@ def run() -> dict[str, Any]:
         report["checks"].append({"id": name, "ok": True})
 
     passed("loader-validation-cli-doctor")
+    report["plugin_lifecycle"] = {
+        "enabled_before": enabled_before,
+        "status_before": initially_installed["status"],
+        "enabled_after": enabled_entry["status"],
+        "payload_topology": "physical-directory",
+    }
+    passed("public-validation-enable-from-empty-profile")
     if args.variant == "profile-b":
         scope_a = os.environ.get("QA_EXPECT_OTHER_PROFILE")
         listed_envelope = json_envelope(root, ["skill-layers", "list", "--json"])
@@ -568,19 +627,20 @@ def run() -> dict[str, Any]:
         conflict_diff["state"] == "needs_resolution" and conflict_diff["unresolved"],
         "Same-line edit did not produce recorded conflict",
     )
+    rejected_argv = [
+        sys.executable,
+        str(root / "hermes"),
+        "skill-layers",
+        "publish",
+        conflict["candidate_id"],
+        "--revision",
+        str(conflict_diff["revision"]),
+        "--review-hash",
+        conflict_diff["review_hash"],
+        "--json",
+    ]
     rejected = subprocess.run(
-        [
-            sys.executable,
-            str(root / "hermes"),
-            "skill-layers",
-            "publish",
-            conflict["candidate_id"],
-            "--revision",
-            str(conflict_diff["revision"]),
-            "--review-hash",
-            conflict_diff["review_hash"],
-            "--json",
-        ],
+        rejected_argv,
         cwd=root,
         env={**os.environ, "PYTHONPATH": str(WORKFLOW_GUARD)},
         capture_output=True,
@@ -588,6 +648,7 @@ def run() -> dict[str, Any]:
         timeout=180,
         check=False,
     )
+    trace_command(rejected_argv, rejected)
     check(
         rejected.returncode != 0 and "CONFLICTS_UNRESOLVED" in rejected.stdout,
         "Unresolved candidate published or had an unexpected failure",
@@ -712,8 +773,8 @@ def run() -> dict[str, Any]:
     passed("rollback-fresh-identity-checkpoint-preserved-prior-exports")
 
     # Re-enter Hermes through the documented helper after PM admission. The long-lived
-    # worker retains the previous generation, so this child verifies shared imports and
-    # backend auth without modifying sys.path.
+    # worker retains the previous generation, so this child verifies the registered tool
+    # and backend auth through the host loaders.
     plugin_data = home / "plugin-data" / "skill-layers"
     before_read = tree_digest(plugin_data)
     skills_before_read = tree_digest(home / "skills")

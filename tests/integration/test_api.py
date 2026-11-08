@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from dashboard import plugin_api
+from skill_layers import dashboard_api as plugin_api
 from skill_layers.contracts import LayerError, ProfileScope
 
 PROFILE = ProfileScope(

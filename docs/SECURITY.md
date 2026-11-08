@@ -38,3 +38,7 @@ Runtime dependencies are the declared `ruamel.yaml` package and the local Git ex
 ## Reports
 
 When reporting a problem, include the plugin version, Hermes version, platform, sanitized error code, candidate/operation ID, and whether the error occurred during capture, review, publication, or recovery. Do not include source text, private skill names, credentials, environment dumps, or complete private paths in public issues. Review diffs locally before sharing them.
+
+## Installation scan
+
+The repository includes the bounded Git subprocess and negative test fixtures, including non-executable binary samples. Hermes' static community-source scan may flag these and stop installation. Review the exact commit and findings before using its documented one-install `--force` trust option; the plugin does not alter the host's scan configuration. See [installation](INSTALL.md#hermes-install-trust-review). Native skill-edit approvals remain separate.

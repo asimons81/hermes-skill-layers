@@ -6,11 +6,11 @@ import sys
 from pathlib import Path
 
 
-def test_entrypoint_registers_without_absolute_self_package(monkeypatch):
-    class RefuseAbsoluteSelfImport(importlib.abc.MetaPathFinder):
+def test_entrypoint_registers_without_self_package_or_web_dependencies(monkeypatch):
+    class RefuseOptionalImports(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path=None, target=None):
-            if fullname == "skill_layers" or fullname.startswith("skill_layers."):
-                raise ImportError("The plugin package was not installed into the probe environment")
+            if fullname.split(".", 1)[0] in {"skill_layers", "fastapi"}:
+                raise ImportError("Optional web and installed self-package imports are unavailable")
             return None
 
     class Context:
@@ -24,7 +24,7 @@ def test_entrypoint_registers_without_absolute_self_package(monkeypatch):
             self.commands.append(record["name"])
 
     for key in list(sys.modules):
-        if key == "skill_layers" or key.startswith("skill_layers."):
+        if key.split(".", 1)[0] in {"skill_layers", "fastapi"}:
             monkeypatch.delitem(sys.modules, key)
     name = "fresh_loader_probe"
     root = Path(__file__).resolve().parents[2]
@@ -33,7 +33,7 @@ def test_entrypoint_registers_without_absolute_self_package(monkeypatch):
     )
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(sys, "meta_path", [RefuseAbsoluteSelfImport(), *sys.meta_path])
+    monkeypatch.setattr(sys, "meta_path", [RefuseOptionalImports(), *sys.meta_path])
     try:
         spec.loader.exec_module(module)
         context = Context()

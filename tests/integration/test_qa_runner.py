@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,22 +34,57 @@ def test_finite_payload_excludes_project_state_and_python_caches(tmp_path, monke
         folder = source / directory
         folder.mkdir()
         (folder / "__init__.py").write_text("# synthetic\n", encoding="utf-8")
-        cache = folder / "__pycache__"
-        cache.mkdir()
-        (cache / "bad.pyc").write_bytes(b"cache")
-    (source / "skill_layers" / "__init__.py").write_text("# finite package\n", encoding="utf-8")
+    nested_package = source / "dashboard" / "api" / "skill_layers"
+    nested_package.mkdir(parents=True)
+    (nested_package / "__init__.py").write_text("# finite package\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "add", *qa.PAYLOAD_FILES, *qa.PAYLOAD_DIRS], check=True
+    )
+    cache = source / "dashboard" / "__pycache__"
+    cache.mkdir()
+    (cache / "bad.pyc").write_bytes(b"cache")
+    egg_info = nested_package / "hermes_skill_layers.egg-info"
+    egg_info.mkdir()
+    (egg_info / "PKG-INFO").write_text("generated build metadata", encoding="utf-8")
+    (source / "dashboard" / "private.py").write_text("private development file", encoding="utf-8")
     (source / "work").mkdir()
     (source / "work" / "secret.txt").write_text("must not copy", encoding="utf-8")
-    (source / ".git").mkdir()
     monkeypatch.setattr(qa, "ROOT", source)
 
     target = tmp_path / "payload"
     qa.copy_finite_payload(target)
 
-    assert (target / "skill_layers" / "__init__.py").is_file()
+    assert (target / "dashboard" / "api" / "skill_layers" / "__init__.py").is_file()
     assert not (target / "work").exists()
     assert not (target / ".git").exists()
     assert not list(target.rglob("*.pyc"))
+    assert not (
+        target / "dashboard" / "api" / "skill_layers" / "hermes_skill_layers.egg-info"
+    ).exists()
+    assert not (target / "dashboard" / "private.py").exists()
+
+
+def test_finite_payload_rejects_indexed_symlinks(tmp_path, monkeypatch):
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "plugin.yaml").write_text("name: finite\n", encoding="utf-8")
+    dashboard = source / "dashboard"
+    dashboard.mkdir()
+    target_file = source / "contents.py"
+    target_file.write_text("fixture\n", encoding="utf-8")
+    try:
+        (dashboard / "linked.py").symlink_to(target_file)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"File symlinks are unavailable on this host: {exc}")
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "add", "plugin.yaml", "dashboard/linked.py"], check=True
+    )
+    monkeypatch.setattr(qa, "ROOT", source)
+
+    with pytest.raises(qa.QAError, match="Symlinked runtime files"):
+        qa.copy_finite_payload(tmp_path / "payload")
 
 
 def test_environment_roots_are_child_only_and_not_project_links(tmp_path, monkeypatch):

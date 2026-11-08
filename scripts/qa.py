@@ -28,7 +28,7 @@ PINS = {
     "2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19": "release-v0.23.0",
 }
 PAYLOAD_FILES = ("plugin.yaml", "__init__.py", "pyproject.toml", "LICENSE")
-PAYLOAD_DIRS = ("skill_layers", "dashboard", "desktop")
+PAYLOAD_DIRS = ("dashboard", "desktop")
 GOLDEN_STEPS = (
     "source_create",
     "derive_review",
@@ -99,27 +99,43 @@ def payload_digest(plugin_dir: Path) -> str:
 
 
 def copy_finite_payload(destination: Path) -> None:
-    """Copy only shipped runtime files; PM snapshots do not exclude project work/."""
+    """Copy Git-indexed distributable files only; PM snapshots include untracked metadata."""
     destination.mkdir(parents=True, exist_ok=False)
-    for name in PAYLOAD_FILES:
-        source = ROOT / name
-        if source.is_file():
-            shutil.copy2(source, destination / name)
-    for name in PAYLOAD_DIRS:
-        source = ROOT / name
-        if not source.is_dir():
-            continue
-        for path in source.rglob("*"):
-            if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
-                continue
-            relative = path.relative_to(source)
-            target = destination / name / relative
-            if path.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif path.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
-    required = ("plugin.yaml", "__init__.py", "pyproject.toml", "skill_layers/__init__.py")
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=False
+    )
+    if result.returncode:
+        raise QAError("Git is required to identify the finite runtime payload")
+    tracked = {Path(item.decode("utf-8")) for item in result.stdout.split(b"\0") if item}
+    allowed_roots = set(PAYLOAD_DIRS)
+    allowed_files = set(PAYLOAD_FILES)
+    payload = sorted(
+        (
+            path
+            for path in tracked
+            if path.as_posix() in allowed_files or path.parts[0] in allowed_roots
+        ),
+        key=lambda path: path.as_posix(),
+    )
+    for relative in payload:
+        source = ROOT / relative
+        try:
+            info = source.lstat()
+        except OSError as exc:
+            raise QAError(f"Indexed runtime file is unavailable: {relative.as_posix()}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise QAError(f"Symlinked runtime files are not admitted: {relative.as_posix()}")
+        if not stat.S_ISREG(info.st_mode):
+            raise QAError(f"Runtime payload entry is not a regular file: {relative.as_posix()}")
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    required = (
+        "plugin.yaml",
+        "__init__.py",
+        "pyproject.toml",
+        "dashboard/api/skill_layers/__init__.py",
+    )
     missing = [name for name in required if not (destination / name).is_file()]
     if missing:
         raise QAError(f"Finite plugin payload is incomplete: {', '.join(missing)}")
@@ -360,10 +376,11 @@ def run_profile(
     profile = run_root / "hermes-home" / "profiles" / variant
     os_home = run_root / "os-home"
     env = clean_environment(profile, os_home, runtime, uv_cache)
-    # Reuse one finite disposable payload tree; never link the development project root.
+    # Each profile owns a physical copy; Hermes plugin removal can then exercise its normal
+    # directory lifecycle without encountering an externally linked source tree.
     target = profile / "plugins" / "skill-layers"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.symlink_to(plugin_snapshot, target_is_directory=True)
+    shutil.copytree(plugin_snapshot, target, symlinks=True)
     guard = run_root / "offline-guard"
     guard.mkdir(parents=True, exist_ok=True)
     attempts = run_root / f"{variant}-network-attempts.txt"
@@ -382,6 +399,7 @@ def run_profile(
     env["QA_GUARD_DIR"] = str(guard)
     env["QA_NETWORK_ATTEMPTS"] = str(attempts)
     env["QA_REPORT_PATH"] = str(run_root / f"{variant}-report.json")
+    env["QA_COMMAND_TRACE"] = str(run_root / f"{variant}-commands.jsonl")
     env["QA_HERMES_ROOT"] = str(hermes_root)
     env["QA_EXPECT_OTHER_PROFILE"] = "qa-release-notes"
     worker = ROOT / "tests" / "integration" / "hermes_host_worker.py"

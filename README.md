@@ -6,7 +6,7 @@ Skill Layers preserves an installed skill as a read-only source reference and le
 
 For the current validation record, see `docs/QA_REPORT.md`, the Actions run for the exact commit under review, and the release handoff. A green CI run alone does not establish Hermes Desktop acceptance for the release payload.
 
-Profile testing covered two named profiles sharing one Hermes root and runtime, with the same canonical finite plugin payload symlinked into both; profile B independently derived a skill. Separate duplicated plugin clones enabled at the same time have not been verified and are not a supported topology claim.
+Each profile has its own installation, source selection, private layer history, and exported skills. The release gate exercises two real named profiles with physical plugin copies, plus the active-profile checks in the Desktop client.
 
 ## What it does
 
@@ -26,11 +26,11 @@ Install a reviewed 40-character release commit from the public repository:
 hermes plugins install asimons81/hermes-skill-layers --ref <40-character-release-commit>
 ```
 
-Replace the placeholder with the commit SHA published for the release. Hermes may ask you to approve the declared Python dependency, `ruamel.yaml`; approve it to enable the plugin. Do not install from a dirty development checkout or symlink the project root into a profile: local `work/` files and host checkouts are not plugin payload. Use a clean repository clone or the immutable Git commit above.
+Replace the placeholder with the commit SHA published for the release. If Hermes stops at its community-source scan, follow the [install trust review](docs/INSTALL.md#hermes-install-trust-review) for that exact commit. Hermes may ask you to approve the declared Python dependency, `ruamel.yaml`; approve it to enable the plugin. Do not install from a dirty development checkout or symlink the project root into a profile: local `work/` files and host checkouts are not plugin payload. Use a clean repository clone or the immutable Git commit above.
 
 The contributed `hermes skill-layers` command requires Hermes plugin isolation mode `in_process`. Skill Layers reports this in `doctor`; it does not change `plugins.isolation` or managed policy. If your administrator pins `plugins.isolation: host`, the contributed CLI is unavailable. Follow that policy and ask the administrator about supported deployment options instead of changing the setting to enable this plugin.
 
-The tested named-profile arrangement uses a shared Hermes root and runtime, with one canonical finite plugin payload symlinked into both profiles. Profile-scoped state is maintained separately and profile B was able to derive independently. Do not assume that installing independent duplicated plugin clones into both profiles is supported or behaves identically.
+Install and enable the plugin in each intended Hermes profile. The source package is a virtual dependency member, so separate physical copies do not require multiple installed distributions with the same Python package name.
 
 `git` must be installed for merge preparation. Hermes plugin installation handles the declared Python dependency through its normal dependency consent flow; Skill Layers does not install dependencies declared by a skill.
 

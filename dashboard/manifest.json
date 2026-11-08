@@ -1,4 +1,4 @@
 {
   "name": "skill-layers",
-  "api": "plugin_api.py"
+  "api": "api/__init__.py"
 }

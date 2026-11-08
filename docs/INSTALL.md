@@ -34,7 +34,17 @@ hermes plugins validate /absolute/path/to/clean/hermes-skill-layers --install-de
 
 Use a clean checkout with only tracked release files. Do not symlink a development project root containing `work/`, host checkouts, environment state, or generated caches into a profile: Hermes' plugin payload snapshot may include files that are not in the distributable package.
 
-The tested named-profile topology uses one Hermes root and runtime shared by both profiles, with the same canonical finite plugin payload symlinked into each profile. Profile B independently derived a skill. Separate duplicated plugin clones enabled simultaneously have not been verified; do not rely on that arrangement based on this test.
+Use a physical plugin installation in each intended Hermes profile. The source package uses a virtual dependency member and a normal Python package API entry, so profile copies share the declared third-party dependencies without installing duplicate self-distributions. The final QA receipt records the physical two-profile install and lifecycle checks.
+
+## Hermes install trust review
+
+Hermes' community-source scan can flag the controlled local Git process, byte constants used by the UTF-8 parser, and intentionally unsafe strings and binary files in the test fixtures. The normal installer may stop with a caution verdict. Review the warnings and the exact pinned source before deciding whether to trust it. If you accept those reviewed operations, Hermes provides a one-install override:
+
+```sh
+hermes plugins install asimons81/hermes-skill-layers --ref <reviewed-40-character-commit> --force
+```
+
+Keep dependency consent explicit. For an intentionally unattended test install, `--yes-deps --enable` approves the declared dependency and enables this install. An install trust decision does not approve native skill edits; those keep Hermes' normal locks and approval controls. Follow managed policy if it prohibits an override.
 
 ## Check installation
 
@@ -64,6 +74,8 @@ hermes skill-layers publish <candidate-id> --revision <revision> --review-hash <
 For the full refresh and rollback workflow, see [README.md](../README.md). For interrupted or stale operations, see [RECOVERY.md](RECOVERY.md).
 
 ## Plugin dependency and runtime behavior
+
+The repository's `package.json` is for contributor browser tests. If Hermes offers a Node sidecar during installation, choose No for normal use: the Desktop file is plain ESM and uses Hermes' existing SDK/React runtime. Run `npm ci` only when developing or running the browser harness.
 
 The runtime Python dependency is `ruamel.yaml`, used for bounded validation of SKILL.md frontmatter. Git is an external local executable used for `git merge-file`; it is not installed automatically by Skill Layers. Merge runs do not fetch repositories or access the network. Skill Layers does not install dependencies listed inside a skill, execute skill scripts, or make plugin-owned model/API calls.
 

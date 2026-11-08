@@ -10,9 +10,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from skill_layers.contracts import MAX_FILE_BYTES, LayerError, ProfileScope, Record
-from skill_layers.service import Service
-from skill_layers.sources import current_scope
+from .contracts import MAX_FILE_BYTES, LayerError, ProfileScope, Record
+from .service import Service
+from .sources import current_scope
 
 router = APIRouter()
 MAX_API_RESPONSE_BYTES = 128 * 1024 * 1024
