@@ -22,7 +22,7 @@ from ruamel.yaml.tokens import (
     TagToken,
 )
 
-from skill_layers.contracts import MAX_FILE_BYTES, NEUTRAL_NAME, Code, LayerError, Tree, TreeFile
+from .contracts import MAX_FILE_BYTES, NEUTRAL_NAME, Code, LayerError, Tree, TreeFile
 
 _EXPORT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _OPENING = (b"---\n", b"---\r\n")

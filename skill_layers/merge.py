@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from skill_layers.contracts import (
+from .contracts import (
     MAX_FILE_BYTES,
     Code,
     Conflict,
